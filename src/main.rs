@@ -1,3 +1,5 @@
+use ember::common::types::{instr::Instruction, opcode::Opcode};
+
 fn main() {
-    println!("Hello, world!");
+    println!("{:?}", Instruction::new(Opcode::HALT, [0, 0, 0]));
 }
