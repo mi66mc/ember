@@ -65,6 +65,28 @@ impl Constant {
 }
 
 impl ValueType {
+    pub fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(ValueType::I8),
+            1 => Some(ValueType::I16),
+            2 => Some(ValueType::I32),
+            3 => Some(ValueType::I64),
+            4 => Some(ValueType::U8),
+            5 => Some(ValueType::U16),
+            6 => Some(ValueType::U32),
+            7 => Some(ValueType::U64),
+            8 => Some(ValueType::F32),
+            9 => Some(ValueType::F64),
+            10 => Some(ValueType::Bool),
+            11 => Some(ValueType::Ptr),
+            _ => None,
+        }
+    }
+
     pub fn size_bytes(&self) -> usize {
         match self {
             ValueType::I8 | ValueType::U8 | ValueType::Bool => 1,

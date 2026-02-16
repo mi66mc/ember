@@ -261,8 +261,9 @@ opcodes! {
     // ─────────────────────────────────────────
     // functions
     // ─────────────────────────────────────────
+    CLOSURE = 0xD7,     // Ra <- closure(protos[Bx])
     CALL = 0xD8,        // call Ra with B args, C returns
-    RET = 0xD9,         // return Ra..Ra+B
+    RET = 0xD9,         // return from current frame
 
     // ─────────────────────────────────────────
     // globals

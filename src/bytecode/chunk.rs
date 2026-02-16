@@ -1,18 +1,30 @@
+use std::rc::Rc;
+
 use crate::common::types::instr::Instruction;
 use crate::common::types::value::Constant;
 
-// chunk = compiled function/block
+// chunk = compiled function/block (like lua prototype)
 //
-// ┌─────────────────────────────────────┐
-// │ code: [instr, instr, instr, ...]    │  <- bytecode
-// │ constants: [const, const, ...]      │  <- literal values
-// │ max_registers: u8                   │  <- register count
-// └─────────────────────────────────────┘
+// ┌─────────────────────────────────────────────────────┐
+// │ code: [instr, instr, instr, ...]                    │  <- bytecode
+// │ constants: [const, const, ...]                      │  <- literal values
+// │ protos: [chunk, chunk, ...]                         │  <- nested functions
+// │ max_registers: u8                                   │  <- register count
+// └─────────────────────────────────────────────────────┘
+//
+// example:
+//   function main()      <- chunk 0
+//     function foo()     <- chunk 0, proto 0
+//       function bar()   <- chunk 0, proto 0, proto 0
+//       end
+//     end
+//   end
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub code: Vec<Instruction>,
     pub constants: Vec<Constant>,
+    pub protos: Vec<Rc<Chunk>>,  // nested functions
     pub max_registers: u8,
 }
 
@@ -21,6 +33,7 @@ impl Chunk {
         Chunk {
             code: Vec::new(),
             constants: Vec::new(),
+            protos: Vec::new(),
             max_registers: 0,
         }
     }
@@ -36,6 +49,13 @@ impl Chunk {
     pub fn add_constant(&mut self, val: Constant) -> u16 {
         let idx = self.constants.len();
         self.constants.push(val);
+        idx as u16
+    }
+
+    // add nested function (proto), return its index
+    pub fn add_proto(&mut self, chunk: Chunk) -> u16 {
+        let idx = self.protos.len();
+        self.protos.push(Rc::new(chunk));
         idx as u16
     }
 

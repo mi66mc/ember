@@ -29,22 +29,46 @@ impl Register {
         Register { bits: 0 }
     }
 
+    // signed integers
+    pub fn from_i8(v: i8) -> Self {
+        Register { i8: v }
+    }
+    pub fn from_i16(v: i16) -> Self {
+        Register { i16: v }
+    }
+    pub fn from_i32(v: i32) -> Self {
+        Register { i32: v }
+    }
     pub fn from_i64(v: i64) -> Self {
         Register { i64: v }
     }
 
+    // unsigned integers
+    pub fn from_u8(v: u8) -> Self {
+        Register { u8: v }
+    }
+    pub fn from_u16(v: u16) -> Self {
+        Register { u16: v }
+    }
+    pub fn from_u32(v: u32) -> Self {
+        Register { u32: v }
+    }
     pub fn from_u64(v: u64) -> Self {
         Register { u64: v }
     }
 
+    // floats
+    pub fn from_f32(v: f32) -> Self {
+        Register { f32: v }
+    }
     pub fn from_f64(v: f64) -> Self {
         Register { f64: v }
     }
 
+    // other
     pub fn from_ptr(v: usize) -> Self {
         Register { ptr: v }
     }
-
     pub fn from_bool(v: bool) -> Self {
         Register { u64: v as u64 }
     }
