@@ -21,3 +21,13 @@ impl Instruction {
         return self.operands;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_instruction_32_bits() {
+        assert!(size_of::<Instruction>() == 4);
+    }
+}
