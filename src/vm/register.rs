@@ -7,6 +7,10 @@
 // │                 │       ptr       │ <- pointer             │
 // └────────────────────────────────────────────────────────────┘
 
+use std::rc::Rc;
+
+use crate::bytecode::Chunk;
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub union Register {
@@ -86,6 +90,46 @@ impl std::fmt::Debug for Register {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum VmValue {
+    Scalar(Register),
+    Function(Rc<Chunk>),
+}
+
+impl VmValue {
+    pub fn scalar(register: Register) -> Self {
+        VmValue::Scalar(register)
+    }
+
+    pub fn function(chunk: Rc<Chunk>) -> Self {
+        VmValue::Function(chunk)
+    }
+
+    pub fn zero() -> Self {
+        VmValue::Scalar(Register::zero())
+    }
+
+    pub fn as_scalar(&self) -> Option<Register> {
+        match self {
+            VmValue::Scalar(register) => Some(*register),
+            VmValue::Function(_) => None,
+        }
+    }
+
+    pub fn as_function(&self) -> Option<Rc<Chunk>> {
+        match self {
+            VmValue::Scalar(_) => None,
+            VmValue::Function(chunk) => Some(chunk.clone()),
+        }
+    }
+}
+
+impl Default for VmValue {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,9 +159,9 @@ mod tests {
 
     #[test]
     fn test_register_f64() {
-        let r = Register::from_f64(3.14);
+        let r = Register::from_f64(1.25);
         unsafe {
-            assert_eq!(r.f64, 3.14);
+            assert_eq!(r.f64, 1.25);
         }
     }
 

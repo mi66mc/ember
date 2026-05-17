@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
-use crate::common::types::instr::Instruction;
-use crate::common::types::value::Constant;
+use crate::bytecode::instruction::Instruction;
+use crate::bytecode::value::Constant;
 
 // chunk = compiled function/block (like lua prototype)
 //
@@ -24,7 +24,7 @@ use crate::common::types::value::Constant;
 pub struct Chunk {
     pub code: Vec<Instruction>,
     pub constants: Vec<Constant>,
-    pub protos: Vec<Rc<Chunk>>,  // nested functions
+    pub protos: Vec<Rc<Chunk>>, // nested functions
     pub max_registers: u8,
 }
 
@@ -77,7 +77,7 @@ impl Default for Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::opcode::Opcode;
+    use crate::bytecode::opcode::Opcode;
 
     #[test]
     fn test_chunk_new() {

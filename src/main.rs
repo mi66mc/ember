@@ -1,10 +1,6 @@
 use std::rc::Rc;
 
-use ember::bytecode::chunk::Chunk;
-use ember::common::types::instr::Instruction;
-use ember::common::types::opcode::Opcode;
-use ember::common::types::value::Constant;
-use ember::vm::exec::VM;
+use ember::{Chunk, Constant, Instruction, Opcode, Vm};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // bubble sort in ember bytecode
@@ -37,25 +33,24 @@ use ember::vm::exec::VM;
 //   R8 = cmp result
 //   R9 = temp / constants
 //
-// globals (for function communication):
-//   G0 = swap address 1
-//   G1 = swap address 2
-
 fn main() {
-    println!("═══════════════════════════════════════════════════");
-    println!("  Ember VM - Bubble Sort Demo");
-    println!("═══════════════════════════════════════════════════\n");
+    let example = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bubble-sort".to_string());
+    if example != "bubble-sort" {
+        eprintln!("unknown example: {example}");
+        eprintln!("available examples: bubble-sort");
+        std::process::exit(2);
+    }
 
     let array = [64, 34, 25, 12, 22, 11, 90, 42, 7, 55];
     let n = array.len();
 
+    println!("Ember VM bytecode example: bubble-sort\n");
     println!("input:  {:?}\n", array);
 
-    // build the bytecode
     let chunk = build_bubble_sort(n);
-
-    // create vm with enough memory for the array
-    let mut vm = VM::new(n * 8 + 64);
+    let mut vm = Vm::new(n * 8 + 64);
 
     // load array into memory
     for (i, &val) in array.iter().enumerate() {
@@ -63,7 +58,7 @@ fn main() {
     }
 
     // run
-    vm.stack.push_frame(Rc::new(chunk));
+    vm.stack.push_entry(Rc::new(chunk));
 
     let mut steps = 0;
     while vm.step().is_ok() {
@@ -80,8 +75,6 @@ fn main() {
     println!("stats:");
     println!("  instructions executed: {}", steps);
     println!("  array size: {}", n);
-
-    // verify it's sorted
     let is_sorted = result.windows(2).all(|w| w[0] <= w[1]);
     println!("  correctly sorted: {}", is_sorted);
 }
@@ -100,9 +93,7 @@ fn build_bubble_sort(n: usize) -> Chunk {
     let c8 = chunk.add_constant(Constant::I64(8));
 
     // emit returns current index
-    let e = |chunk: &mut Chunk, instr: Instruction| -> usize {
-        chunk.emit(instr)
-    };
+    let e = |chunk: &mut Chunk, instr: Instruction| -> usize { chunk.emit(instr) };
 
     // ─── init ───
     e(&mut chunk, Instruction::abx(Opcode::LOADK, 0, cn)); // 0: R0 = n
@@ -139,11 +130,11 @@ fn build_bubble_sort(n: usize) -> Chunk {
     e(&mut chunk, Instruction::abc(Opcode::GT_I64, 8, 6, 7)); // 18: R8 = (arr[j] > arr[j+1])
     let skip_swap_jmp = e(&mut chunk, Instruction::asbx(Opcode::JMPIFNOT, 8, 0)); // 19: patch later
 
-    // call swap
-    e(&mut chunk, Instruction::abx(Opcode::SETG, 4, 0)); // 20: G0 = addr_j
-    e(&mut chunk, Instruction::abx(Opcode::SETG, 5, 1)); // 21: G1 = addr_j1
-    e(&mut chunk, Instruction::abx(Opcode::CLOSURE, 11, swap_proto)); // 22
-    e(&mut chunk, Instruction::abc(Opcode::CALL, 11, 0, 0)); // 23
+    // call swap(addr_j, addr_j1)
+    e(&mut chunk, Instruction::abx(Opcode::CLOSURE, 9, swap_proto)); // 20
+    e(&mut chunk, Instruction::abc(Opcode::MOVE, 10, 4, 0)); // 21
+    e(&mut chunk, Instruction::abc(Opcode::MOVE, 11, 5, 0)); // 22
+    e(&mut chunk, Instruction::abc(Opcode::CALL, 9, 2, 0)); // 23
 
     // j++ (inner_continue = 24)
     let inner_continue = 24;
@@ -151,7 +142,10 @@ fn build_bubble_sort(n: usize) -> Chunk {
     e(&mut chunk, Instruction::abc(Opcode::ADD_I64, 2, 2, 9)); // 25: j = j + 1
 
     // jump to inner_loop: from 26, target 8 -> offset = 8 - 26 = -18
-    e(&mut chunk, Instruction::jmp(Opcode::JMP, (inner_loop as i16) - 26)); // 26
+    e(
+        &mut chunk,
+        Instruction::jmp(Opcode::JMP, (inner_loop as i16) - 26),
+    ); // 26
 
     // ─── outer continue (27) ───
     let outer_continue = 27;
@@ -159,7 +153,10 @@ fn build_bubble_sort(n: usize) -> Chunk {
     e(&mut chunk, Instruction::abc(Opcode::ADD_I64, 1, 1, 9)); // 28: i = i + 1
 
     // jump to outer_loop: from 29, target 2 -> offset = 2 - 29 = -27
-    e(&mut chunk, Instruction::jmp(Opcode::JMP, (outer_loop as i16) - 29)); // 29
+    e(
+        &mut chunk,
+        Instruction::jmp(Opcode::JMP, (outer_loop as i16) - 29),
+    ); // 29
 
     // ─── end (30) ───
     let end = 30;
@@ -167,21 +164,27 @@ fn build_bubble_sort(n: usize) -> Chunk {
 
     // ─── patch jumps ───
     // outer_exit_jmp (5): jump to end (30) -> offset = 30 - 5 = 25
-    chunk.code[outer_exit_jmp] = Instruction::asbx(Opcode::JMPIFNOT, 8, (end - outer_exit_jmp) as i16);
+    chunk.code[outer_exit_jmp] =
+        Instruction::asbx(Opcode::JMPIFNOT, 8, (end - outer_exit_jmp) as i16);
 
     // inner_exit_jmp (9): jump to outer_continue (27) -> offset = 27 - 9 = 18
-    chunk.code[inner_exit_jmp] = Instruction::asbx(Opcode::JMPIFNOT, 8, (outer_continue - inner_exit_jmp) as i16);
+    chunk.code[inner_exit_jmp] = Instruction::asbx(
+        Opcode::JMPIFNOT,
+        8,
+        (outer_continue - inner_exit_jmp) as i16,
+    );
 
     // skip_swap_jmp (19): jump to inner_continue (24) -> offset = 24 - 19 = 5
-    chunk.code[skip_swap_jmp] = Instruction::asbx(Opcode::JMPIFNOT, 8, (inner_continue - skip_swap_jmp) as i16);
+    chunk.code[skip_swap_jmp] =
+        Instruction::asbx(Opcode::JMPIFNOT, 8, (inner_continue - skip_swap_jmp) as i16);
 
     chunk
 }
 
 fn build_swap_function() -> Chunk {
-    // swap values at memory addresses G0 and G1
-    // R0 = G0 (addr1)
-    // R1 = G1 (addr2)
+    // swap(addr1, addr2)
+    // R0 = addr1
+    // R1 = addr2
     // R2 = mem[addr1]
     // R3 = mem[addr2]
     // mem[addr1] = R3
@@ -190,26 +193,20 @@ fn build_swap_function() -> Chunk {
     let mut chunk = Chunk::new();
     chunk.max_registers = 4;
 
-    // R0 = G0 (addr1)
-    chunk.emit(Instruction::abx(Opcode::GETG, 0, 0)); // 0
-
-    // R1 = G1 (addr2)
-    chunk.emit(Instruction::abx(Opcode::GETG, 1, 1)); // 1
-
     // R2 = mem[R0] (val1)
-    chunk.emit(Instruction::abc(Opcode::LOAD_I64, 2, 0, 0)); // 2
+    chunk.emit(Instruction::abc(Opcode::LOAD_I64, 2, 0, 0)); // 0
 
     // R3 = mem[R1] (val2)
-    chunk.emit(Instruction::abc(Opcode::LOAD_I64, 3, 1, 0)); // 3
+    chunk.emit(Instruction::abc(Opcode::LOAD_I64, 3, 1, 0)); // 1
 
     // mem[R0] = R3
-    chunk.emit(Instruction::abc(Opcode::STORE_I64, 0, 0, 3)); // 4
+    chunk.emit(Instruction::abc(Opcode::STORE_I64, 0, 0, 3)); // 2
 
     // mem[R1] = R2
-    chunk.emit(Instruction::abc(Opcode::STORE_I64, 1, 0, 2)); // 5
+    chunk.emit(Instruction::abc(Opcode::STORE_I64, 1, 0, 2)); // 3
 
     // return
-    chunk.emit(Instruction::abc(Opcode::RET, 0, 0, 0)); // 6
+    chunk.emit(Instruction::abc(Opcode::RET, 0, 0, 0)); // 4
 
     chunk
 }

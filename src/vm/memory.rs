@@ -32,13 +32,23 @@ impl Memory {
     // generic access (unsafe, no bounds check)
     // ─────────────────────────────────────────
 
-    // mem[addr] -> T
+    /// Reads a plain-old-data value from a byte address without checking bounds.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `addr..addr + size_of::<T>()` is inside the memory
+    /// allocation. The returned bytes must be a valid bit pattern for `T`.
     #[inline]
     pub unsafe fn read<T: Copy>(&self, addr: usize) -> T {
         unsafe { (self.data.as_ptr().add(addr) as *const T).read_unaligned() }
     }
 
-    // mem[addr] <- val
+    /// Writes a plain-old-data value to a byte address without checking bounds.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `addr..addr + size_of::<T>()` is inside the memory
+    /// allocation.
     #[inline]
     pub unsafe fn write<T: Copy>(&mut self, addr: usize, val: T) {
         unsafe { (self.data.as_mut_ptr().add(addr) as *mut T).write_unaligned(val) };
@@ -109,8 +119,8 @@ mod tests {
     fn test_read_write_f64() {
         let mut mem = Memory::new(64);
         unsafe {
-            mem.write::<f64>(0, 3.14159);
-            assert_eq!(mem.read::<f64>(0), 3.14159);
+            mem.write::<f64>(0, 1.25);
+            assert_eq!(mem.read::<f64>(0), 1.25);
         }
     }
 
