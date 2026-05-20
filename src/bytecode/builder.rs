@@ -1,4 +1,4 @@
-use crate::bytecode::{Chunk, Constant, Instruction, Opcode};
+use crate::bytecode::{Chunk, Instruction, Opcode};
 
 #[derive(Debug, Default)]
 pub struct Builder {
@@ -10,14 +10,6 @@ impl Builder {
         let mut chunk = Chunk::new();
         chunk.max_registers = max_registers;
         Self { chunk }
-    }
-
-    pub fn constant(&mut self, value: Constant) -> u16 {
-        self.chunk.add_constant(value)
-    }
-
-    pub fn proto(&mut self, chunk: Chunk) -> u16 {
-        self.chunk.add_proto(chunk)
     }
 
     pub fn emit(&mut self, instruction: Instruction) -> usize {

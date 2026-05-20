@@ -10,6 +10,7 @@
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
+use crate::vm::native::NativeFunction;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -94,6 +95,8 @@ impl std::fmt::Debug for Register {
 pub enum VmValue {
     Scalar(Register),
     Function(Rc<Chunk>),
+    NativeFunction(NativeFunction),
+    String(Rc<str>),
 }
 
 impl VmValue {
@@ -105,6 +108,14 @@ impl VmValue {
         VmValue::Function(chunk)
     }
 
+    pub fn native_function(function: NativeFunction) -> Self {
+        VmValue::NativeFunction(function)
+    }
+
+    pub fn string(value: impl Into<Rc<str>>) -> Self {
+        VmValue::String(value.into())
+    }
+
     pub fn zero() -> Self {
         VmValue::Scalar(Register::zero())
     }
@@ -112,14 +123,21 @@ impl VmValue {
     pub fn as_scalar(&self) -> Option<Register> {
         match self {
             VmValue::Scalar(register) => Some(*register),
-            VmValue::Function(_) => None,
+            VmValue::Function(_) | VmValue::NativeFunction(_) | VmValue::String(_) => None,
         }
     }
 
     pub fn as_function(&self) -> Option<Rc<Chunk>> {
         match self {
-            VmValue::Scalar(_) => None,
+            VmValue::Scalar(_) | VmValue::NativeFunction(_) | VmValue::String(_) => None,
             VmValue::Function(chunk) => Some(chunk.clone()),
+        }
+    }
+
+    pub fn as_native_function(&self) -> Option<NativeFunction> {
+        match self {
+            VmValue::NativeFunction(function) => Some(function.clone()),
+            VmValue::Scalar(_) | VmValue::Function(_) | VmValue::String(_) => None,
         }
     }
 }

@@ -1,0 +1,26 @@
+.module "hello"
+.version 1
+.entry 0
+
+.natives
+  0 "std.print_str"
+  1 "std.print_i64"
+
+.constants
+  0 string "hello from ember"
+  1 i64 42
+
+.callables
+  0 native 0
+  1 native 1
+
+.functions
+  0 "main" regs=2
+    0000 closure r0, 0
+    0001 loadk r1, 0
+    0002 call r0, 1, 0
+    0003 closure r0, 1
+    0004 loadk r1, 1
+    0005 call r0, 1, 0
+    0006 halt
+  end

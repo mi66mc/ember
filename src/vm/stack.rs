@@ -113,8 +113,6 @@ mod tests {
     fn make_chunk(max_regs: u8) -> Rc<Chunk> {
         Rc::new(Chunk {
             code: Vec::new(),
-            constants: Vec::new(),
-            protos: Vec::new(),
             max_registers: max_regs,
         })
     }

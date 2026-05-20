@@ -15,7 +15,7 @@ pub enum ValueType {
     Ptr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
     I8(i8),
     I16(i16),
@@ -28,6 +28,7 @@ pub enum Constant {
     F32(f32),
     F64(f64),
     Bool(bool),
+    String(String),
 }
 
 impl Constant {
@@ -44,11 +45,12 @@ impl Constant {
             Constant::F32(_) => ValueType::F32,
             Constant::F64(_) => ValueType::F64,
             Constant::Bool(_) => ValueType::Bool,
+            Constant::String(_) => ValueType::Ptr,
         }
     }
 
-    pub fn to_bits(&self) -> u64 {
-        match *self {
+    pub fn to_bits(&self) -> Option<u64> {
+        Some(match *self {
             Constant::I8(v) => v as i64 as u64,
             Constant::I16(v) => v as i64 as u64,
             Constant::I32(v) => v as i64 as u64,
@@ -60,7 +62,8 @@ impl Constant {
             Constant::F32(v) => v.to_bits() as u64,
             Constant::F64(v) => v.to_bits(),
             Constant::Bool(v) => v as u64,
-        }
+            Constant::String(_) => return None,
+        })
     }
 }
 
@@ -130,7 +133,8 @@ mod tests {
     fn constants_report_types_and_bits() {
         assert_eq!(Constant::I32(42).value_type(), ValueType::I32);
         assert_eq!(Constant::F64(1.25).value_type(), ValueType::F64);
-        assert_eq!(Constant::I64(-1).to_bits(), u64::MAX);
-        assert_eq!(Constant::Bool(true).to_bits(), 1);
+        assert_eq!(Constant::I64(-1).to_bits(), Some(u64::MAX));
+        assert_eq!(Constant::Bool(true).to_bits(), Some(1));
+        assert_eq!(Constant::String("ok".to_string()).to_bits(), None);
     }
 }

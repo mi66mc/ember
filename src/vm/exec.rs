@@ -1,7 +1,10 @@
 use std::rc::Rc;
 
-use crate::bytecode::{Chunk, Instruction, Opcode, ValueType};
+use crate::bytecode::{
+    Callable, Chunk, Constant, Function, Instruction, Module, Opcode, ValueType,
+};
 use crate::vm::memory::Memory;
+use crate::vm::native::{NativeError, NativeRegistry};
 use crate::vm::register::{Register, VmValue};
 use crate::vm::stack::CallStack;
 
@@ -183,12 +186,16 @@ pub enum VMError {
     StackUnderflow,
     DivisionByZero,
     InvalidConstantIndex(u16),
-    InvalidProtoIndex(u16),
+    InvalidCallableIndex(u16),
+    InvalidFunctionIndex(u32),
+    InvalidNativeIndex(u32),
     InvalidConversionType(u8),
     InvalidProgramCounter { pc: usize, len: usize },
     InvalidRegister(u8),
     ExpectedScalar(u8),
     ExpectedFunction(u8),
+    UnknownNativeFunction(String),
+    NativeError(String),
     InvalidJump { from: usize, offset: i16 },
     MemoryOutOfBounds { addr: usize, size: usize },
     Halted,
@@ -198,6 +205,8 @@ pub struct Vm {
     pub stack: CallStack,
     pub memory: Memory,
     pub globals: Vec<VmValue>,
+    pub natives: NativeRegistry,
+    module: Option<Rc<Module>>,
 }
 
 pub type VM = Vm;
@@ -208,20 +217,51 @@ impl Vm {
             stack: CallStack::new(),
             memory: Memory::new(memory_size),
             globals: Vec::new(),
+            natives: NativeRegistry::with_std(),
+            module: None,
+        }
+    }
+
+    pub fn with_natives(memory_size: usize, natives: NativeRegistry) -> Self {
+        Vm {
+            stack: CallStack::new(),
+            memory: Memory::new(memory_size),
+            globals: Vec::new(),
+            natives,
+            module: None,
         }
     }
 
     pub fn run(&mut self, chunk: Chunk) -> Result<(), VMError> {
-        self.stack.push_entry(Rc::new(chunk));
+        let mut module = Module::new("<chunk>");
+        module.functions.push(Function {
+            name: "main".to_string(),
+            chunk,
+        });
+        self.run_module(module)
+    }
+
+    pub fn run_module(&mut self, module: Module) -> Result<(), VMError> {
+        let entry = module
+            .entry_function()
+            .ok_or(VMError::InvalidFunctionIndex(module.entry))?
+            .chunk
+            .clone();
+        self.module = Some(Rc::new(module));
+        self.stack.push_entry(Rc::new(entry));
 
         loop {
             match self.step() {
                 Ok(()) => {}
                 Err(VMError::Halted) => {
                     self.stack.pop_frame();
+                    self.module = None;
                     return Ok(());
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.module = None;
+                    return Err(error);
+                }
             }
         }
     }
@@ -236,15 +276,23 @@ impl Vm {
 
             Opcode::LOADK => {
                 let constant = {
-                    let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
-                    frame
-                        .chunk
+                    self.module()?
                         .constants
                         .get(instr.bx() as usize)
                         .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
-                        .to_bits()
+                        .clone()
                 };
-                self.set_scalar(instr.a(), Register { bits: constant })?;
+                match constant {
+                    Constant::String(value) => self.set_value(instr.a(), VmValue::string(value))?,
+                    constant => self.set_scalar(
+                        instr.a(),
+                        Register {
+                            bits: constant
+                                .to_bits()
+                                .expect("non-string constants always have scalar bits"),
+                        },
+                    )?,
+                }
             }
             Opcode::MOVE => {
                 let value = self.value(instr.b())?;
@@ -427,16 +475,34 @@ impl Vm {
             }
 
             Opcode::CLOSURE => {
-                let proto = {
-                    let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
-                    frame
-                        .chunk
-                        .protos
+                let closure = {
+                    let module = self.module()?;
+                    match module
+                        .callables
                         .get(instr.bx() as usize)
-                        .ok_or(VMError::InvalidProtoIndex(instr.bx()))?
-                        .clone()
+                        .ok_or(VMError::InvalidCallableIndex(instr.bx()))?
+                    {
+                        Callable::Function(function_id) => {
+                            let function = module
+                                .functions
+                                .get(*function_id as usize)
+                                .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
+                            VmValue::function(Rc::new(function.chunk.clone()))
+                        }
+                        Callable::Native(native_id) => {
+                            let native_name = &module
+                                .natives
+                                .get(*native_id as usize)
+                                .ok_or(VMError::InvalidNativeIndex(*native_id))?
+                                .name;
+                            let native = self.natives.get(native_name).ok_or_else(|| {
+                                VMError::UnknownNativeFunction(native_name.clone())
+                            })?;
+                            VmValue::native_function(native)
+                        }
+                    }
                 };
-                self.set_value(instr.a(), VmValue::function(proto))?;
+                self.set_value(instr.a(), closure)?;
             }
             Opcode::CALL => self.call(instr.a(), instr.b(), instr.c())?,
             Opcode::RET => self.ret(instr.a(), instr.b())?,
@@ -518,6 +584,10 @@ impl Vm {
             })
     }
 
+    fn module(&self) -> Result<&Module, VMError> {
+        self.module.as_deref().ok_or(VMError::StackUnderflow)
+    }
+
     fn jump(&mut self, offset: i16) -> Result<(), VMError> {
         let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
         let from = frame.pc;
@@ -530,14 +600,7 @@ impl Vm {
     }
 
     fn call(&mut self, base: u8, arg_count: u8, expected_returns: u8) -> Result<(), VMError> {
-        let function = self
-            .value(base)?
-            .as_function()
-            .ok_or(VMError::ExpectedFunction(base))?;
-
-        if arg_count as usize > function.max_registers as usize {
-            return Err(VMError::InvalidRegister(arg_count));
-        }
+        let callable = self.value(base)?;
 
         let mut args = Vec::with_capacity(arg_count as usize);
         for index in 0..arg_count {
@@ -548,11 +611,39 @@ impl Vm {
             args.push(self.value(source)?);
         }
 
-        self.stack.push_call(function, base, expected_returns);
-        for (index, value) in args.into_iter().enumerate() {
-            self.set_value(index as u8, value)?;
+        if let Some(function) = callable.as_function() {
+            if arg_count as usize > function.max_registers as usize {
+                return Err(VMError::InvalidRegister(arg_count));
+            }
+
+            self.stack.push_call(function, base, expected_returns);
+            for (index, value) in args.into_iter().enumerate() {
+                self.set_value(index as u8, value)?;
+            }
+            return Ok(());
         }
-        Ok(())
+
+        if let Some(function) = callable.as_native_function() {
+            let returns = function
+                .call(&args)
+                .map_err(|NativeError { message }| VMError::NativeError(message))?;
+            let copy_count = usize::min(expected_returns as usize, returns.len());
+            for (index, value) in returns.into_iter().take(copy_count).enumerate() {
+                let target = base
+                    .checked_add(index as u8)
+                    .ok_or(VMError::InvalidRegister(base))?;
+                self.set_value(target, value)?;
+            }
+            for index in copy_count..expected_returns as usize {
+                let target = base
+                    .checked_add(index as u8)
+                    .ok_or(VMError::InvalidRegister(base))?;
+                self.set_value(target, VmValue::default())?;
+            }
+            return Ok(());
+        }
+
+        Err(VMError::ExpectedFunction(base))
     }
 
     fn ret(&mut self, base: u8, returned_count: u8) -> Result<(), VMError> {
@@ -592,32 +683,44 @@ mod tests {
     use super::*;
     use crate::bytecode::{Constant, Instruction};
 
-    fn run_chunk(chunk: Chunk) -> Result<Vm, VMError> {
+    fn run_module(module: Module) -> Result<Vm, VMError> {
         let mut vm = Vm::new(1024);
-        vm.run(chunk)?;
+        vm.run_module(module)?;
         Ok(vm)
+    }
+
+    fn module_for(chunk: Chunk) -> Module {
+        let mut module = Module::new("test");
+        module.functions.push(Function {
+            name: "main".to_string(),
+            chunk,
+        });
+        module
     }
 
     #[test]
     fn halt_finishes_run() {
         let mut chunk = Chunk::new();
         chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
-        assert!(run_chunk(chunk).is_ok());
+        assert!(run_module(module_for(chunk)).is_ok());
     }
 
     #[test]
     fn arithmetic_and_comparison_work() {
         let mut chunk = Chunk::new();
         chunk.max_registers = 4;
-        let c10 = chunk.add_constant(Constant::I64(10));
-        let c20 = chunk.add_constant(Constant::I64(20));
-        chunk.emit(Instruction::abx(Opcode::LOADK, 0, c10));
-        chunk.emit(Instruction::abx(Opcode::LOADK, 1, c20));
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        chunk.emit(Instruction::abx(Opcode::LOADK, 1, 1));
         chunk.emit(Instruction::abc(Opcode::ADD_I64, 2, 0, 1));
         chunk.emit(Instruction::abc(Opcode::LT_I64, 3, 0, 1));
 
+        let mut module = module_for(chunk);
+        module.constants.push(Constant::I64(10));
+        module.constants.push(Constant::I64(20));
         let mut vm = Vm::new(1024);
-        vm.stack.push_entry(Rc::new(chunk));
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry));
         vm.step().unwrap();
         vm.step().unwrap();
         vm.step().unwrap();
@@ -638,17 +741,29 @@ mod tests {
 
         let mut main = Chunk::new();
         main.max_registers = 4;
-        let proto = main.add_proto(add);
-        let c10 = main.add_constant(Constant::I64(10));
-        let c20 = main.add_constant(Constant::I64(20));
-        main.emit(Instruction::abx(Opcode::CLOSURE, 0, proto));
-        main.emit(Instruction::abx(Opcode::LOADK, 1, c10));
-        main.emit(Instruction::abx(Opcode::LOADK, 2, c20));
+        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
+        main.emit(Instruction::abx(Opcode::LOADK, 1, 0));
+        main.emit(Instruction::abx(Opcode::LOADK, 2, 1));
         main.emit(Instruction::abc(Opcode::CALL, 0, 2, 1));
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
+        let mut module = Module::new("test");
+        module.entry = 0;
+        module.constants = vec![Constant::I64(10), Constant::I64(20)];
+        module.callables = vec![Callable::Function(1)];
+        module.functions.push(Function {
+            name: "main".to_string(),
+            chunk: main,
+        });
+        module.functions.push(Function {
+            name: "add".to_string(),
+            chunk: add,
+        });
+
         let mut vm = Vm::new(1024);
-        vm.stack.push_entry(Rc::new(main));
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry));
         loop {
             match vm.step() {
                 Ok(()) => {}
@@ -666,21 +781,31 @@ mod tests {
     fn call_with_multiple_returns() {
         let mut pair = Chunk::new();
         pair.max_registers = 2;
-        let c1 = pair.add_constant(Constant::I64(1));
-        let c2 = pair.add_constant(Constant::I64(2));
-        pair.emit(Instruction::abx(Opcode::LOADK, 0, c1));
-        pair.emit(Instruction::abx(Opcode::LOADK, 1, c2));
+        pair.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        pair.emit(Instruction::abx(Opcode::LOADK, 1, 1));
         pair.emit(Instruction::abc(Opcode::RET, 0, 2, 0));
 
         let mut main = Chunk::new();
         main.max_registers = 3;
-        let proto = main.add_proto(pair);
-        main.emit(Instruction::abx(Opcode::CLOSURE, 0, proto));
+        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
         main.emit(Instruction::abc(Opcode::CALL, 0, 0, 2));
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
+        let mut module = Module::new("test");
+        module.constants = vec![Constant::I64(1), Constant::I64(2)];
+        module.callables = vec![Callable::Function(1)];
+        module.functions.push(Function {
+            name: "main".to_string(),
+            chunk: main,
+        });
+        module.functions.push(Function {
+            name: "pair".to_string(),
+            chunk: pair,
+        });
         let mut vm = Vm::new(1024);
-        vm.stack.push_entry(Rc::new(main));
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry));
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
         unsafe {
@@ -693,26 +818,40 @@ mod tests {
     fn nested_calls_return_to_callers() {
         let mut leaf = Chunk::new();
         leaf.max_registers = 1;
-        let c7 = leaf.add_constant(Constant::I64(7));
-        leaf.emit(Instruction::abx(Opcode::LOADK, 0, c7));
+        leaf.emit(Instruction::abx(Opcode::LOADK, 0, 0));
         leaf.emit(Instruction::abc(Opcode::RET, 0, 1, 0));
 
         let mut middle = Chunk::new();
         middle.max_registers = 1;
-        let leaf_proto = middle.add_proto(leaf);
-        middle.emit(Instruction::abx(Opcode::CLOSURE, 0, leaf_proto));
+        middle.emit(Instruction::abx(Opcode::CLOSURE, 0, 1));
         middle.emit(Instruction::abc(Opcode::CALL, 0, 0, 1));
         middle.emit(Instruction::abc(Opcode::RET, 0, 1, 0));
 
         let mut main = Chunk::new();
         main.max_registers = 1;
-        let middle_proto = main.add_proto(middle);
-        main.emit(Instruction::abx(Opcode::CLOSURE, 0, middle_proto));
+        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
         main.emit(Instruction::abc(Opcode::CALL, 0, 0, 1));
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
+        let mut module = Module::new("test");
+        module.constants = vec![Constant::I64(7)];
+        module.callables = vec![Callable::Function(1), Callable::Function(2)];
+        module.functions.push(Function {
+            name: "main".to_string(),
+            chunk: main,
+        });
+        module.functions.push(Function {
+            name: "middle".to_string(),
+            chunk: middle,
+        });
+        module.functions.push(Function {
+            name: "leaf".to_string(),
+            chunk: leaf,
+        });
         let mut vm = Vm::new(1024);
-        vm.stack.push_entry(Rc::new(main));
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry));
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
         unsafe {
@@ -744,21 +883,26 @@ mod tests {
 
         let mut bad_reg = Chunk::new();
         bad_reg.max_registers = 1;
-        let c1 = bad_reg.add_constant(Constant::I64(1));
-        bad_reg.emit(Instruction::abx(Opcode::LOADK, 2, c1));
+        bad_reg.emit(Instruction::abx(Opcode::LOADK, 2, 0));
         let mut vm = Vm::new(8);
-        vm.stack.push_entry(Rc::new(bad_reg));
+        let mut module = module_for(bad_reg);
+        module.constants.push(Constant::I64(1));
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry));
         assert_eq!(vm.step(), Err(VMError::InvalidRegister(2)));
 
         let mut bad_mem = Chunk::new();
         bad_mem.max_registers = 2;
-        let c4 = bad_mem.add_constant(Constant::I64(4));
-        let c9 = bad_mem.add_constant(Constant::I64(9));
-        bad_mem.emit(Instruction::abx(Opcode::LOADK, 0, c4));
-        bad_mem.emit(Instruction::abx(Opcode::LOADK, 1, c9));
+        bad_mem.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        bad_mem.emit(Instruction::abx(Opcode::LOADK, 1, 1));
         bad_mem.emit(Instruction::abc(Opcode::STORE_I64, 0, 0, 1));
         let mut vm = Vm::new(8);
-        vm.stack.push_entry(Rc::new(bad_mem));
+        let mut module = module_for(bad_mem);
+        module.constants = vec![Constant::I64(4), Constant::I64(9)];
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry));
         vm.step().unwrap();
         vm.step().unwrap();
         assert_eq!(

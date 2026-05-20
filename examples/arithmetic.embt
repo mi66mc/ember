@@ -1,0 +1,27 @@
+.module "arithmetic"
+.version 1
+.entry 0
+
+.natives
+  0 "std.print_i64"
+
+.constants
+  0 i64 7
+  1 i64 6
+  2 i64 3
+
+.callables
+  0 native 0
+
+.functions
+  0 "main" regs=5
+    0000 loadk r0, 0
+    0001 loadk r1, 1
+    0002 loadk r2, 2
+    0003 mul.i64 r3, r0, r1
+    0004 add.i64 r3, r3, r2
+    0005 closure r0, 0
+    0006 move r1, r3, r0
+    0007 call r0, 1, 0
+    0008 halt
+  end
