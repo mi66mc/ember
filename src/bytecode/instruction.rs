@@ -59,3 +59,31 @@ impl Instruction {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instruction_stays_32_bits() {
+        assert_eq!(size_of::<Instruction>(), 4);
+    }
+
+    #[test]
+    fn formats_round_trip_operands() {
+        let abc = Instruction::abc(Opcode::ADD_I64, 0, 1, 2);
+        assert_eq!(abc.a(), 0);
+        assert_eq!(abc.b(), 1);
+        assert_eq!(abc.c(), 2);
+
+        let abx = Instruction::abx(Opcode::LOADK, 5, 1000);
+        assert_eq!(abx.a(), 5);
+        assert_eq!(abx.bx(), 1000);
+
+        let asbx = Instruction::asbx(Opcode::JMPIF, 3, -50);
+        assert_eq!(asbx.a(), 3);
+        assert_eq!(asbx.sbx(), -50);
+
+        let jmp = Instruction::jmp(Opcode::JMP, -10);
+        assert_eq!(jmp.sbx_ab(), -10);
+    }
+}

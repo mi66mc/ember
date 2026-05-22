@@ -208,3 +208,20 @@ opcodes! {
     HALT = 0xFF,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opcode_round_trip() {
+        let original = Opcode::ADD_I64;
+        assert_eq!(Opcode::from_byte(original.to_byte()), Some(original));
+    }
+
+    #[test]
+    fn invalid_opcode_bytes_return_none() {
+        assert!(Opcode::from_byte(0x16).is_none());
+        assert!(Opcode::from_byte(0x17).is_none());
+        assert!(Opcode::from_byte(0x1F).is_none());
+    }
+}

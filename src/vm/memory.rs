@@ -124,3 +124,71 @@ impl Memory {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new() {
+        let mem = Memory::new(1024);
+        assert_eq!(mem.size(), 1024);
+    }
+
+    #[test]
+    fn test_grow() {
+        let mut mem = Memory::new(1024);
+        let old = mem.grow(512);
+        assert_eq!(old, 1024);
+        assert_eq!(mem.size(), 1536);
+    }
+
+    #[test]
+    fn test_read_write_i64() {
+        let mut mem = Memory::new(64);
+        unsafe {
+            mem.write::<i64>(0, -42);
+            assert_eq!(mem.read::<i64>(0), -42);
+        }
+    }
+
+    #[test]
+    fn test_read_write_f64() {
+        let mut mem = Memory::new(64);
+        unsafe {
+            mem.write::<f64>(0, 1.25);
+            assert_eq!(mem.read::<f64>(0), 1.25);
+        }
+    }
+
+    #[test]
+    fn test_multiple_values() {
+        let mut mem = Memory::new(64);
+        unsafe {
+            mem.write::<i64>(0, 111);
+            mem.write::<i64>(8, 222);
+            mem.write::<i32>(16, 333);
+            mem.write::<i16>(20, 444);
+            mem.write::<i8>(22, 55);
+
+            assert_eq!(mem.read::<i64>(0), 111);
+            assert_eq!(mem.read::<i64>(8), 222);
+            assert_eq!(mem.read::<i32>(16), 333);
+            assert_eq!(mem.read::<i16>(20), 444);
+            assert_eq!(mem.read::<i8>(22), 55);
+        }
+    }
+
+    #[test]
+    fn test_checked_read() {
+        let mem = Memory::new(8);
+        assert!(mem.read_checked::<i64>(0).is_some());
+        assert!(mem.read_checked::<i64>(1).is_none()); // out of bounds
+    }
+
+    #[test]
+    fn test_checked_write() {
+        let mut mem = Memory::new(8);
+        assert!(mem.write_checked::<i64>(0, 42));
+        assert!(!mem.write_checked::<i64>(1, 42)); // out of bounds
+    }
+}

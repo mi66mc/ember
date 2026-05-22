@@ -1174,3 +1174,132 @@ fn emit_ext_jmp(offset: i32) -> Result<(Instruction, Instruction), TextError> {
     Ok((ext, instr))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_literal_print_program() {
+        let source = r#"
+            .module "hello"
+            .version 1
+            .entry 0
+
+            .import
+              io.print_i64
+
+            .constants
+              0 i64 42
+
+            .callables
+              0 io.print_i64
+
+            .functions
+              0 "main" regs=2
+                closure r0, 0
+                loadk r1, 0
+                call r0, 1, 0
+                halt
+              end
+        "#;
+
+        let module = parse_module(source).unwrap();
+        assert_eq!(module.name, "hello");
+        assert_eq!(module.constants[0], Constant::I64(42));
+        assert_eq!(module.callables[0], Callable::Import(0));
+        assert_eq!(module.functions[0].chunk.code.len(), 4);
+    }
+
+    #[test]
+    fn labels_resolve_to_correct_offsets() {
+        let source = r#"
+            .module "loop"
+            .version 1
+            .entry 0
+
+            .constants
+              0 i64 0
+              1 i64 10
+              2 i64 1
+
+            .functions
+              0 "main" regs=4
+                loadk r0, 0       ;; r0 = 0 (counter)
+                loadk r1, 1       ;; r1 = 10 (limit)
+                loadk r2, 2       ;; r2 = 1 (step)
+              @loop:
+                lt.i64 r3, r0, r1
+                jmpifnot r3, @end
+                add.i64 r0, r0, r2
+                jmp @loop
+              @end:
+                halt
+              end
+        "#;
+
+        let module = parse_module(source).unwrap();
+        let chunk = &module.functions[0].chunk;
+        assert_eq!(chunk.code.len(), 8);
+
+        // @loop: points at PC 3 (the lt.i64 instruction)
+        // @end: points at PC 7 (the halt instruction)
+        // Instruction 3 (index 3): lt.i64
+        assert_eq!(chunk.code[3].opcode(), Opcode::LT_I64);
+        // Instruction 4 (index 4): jmpifnot r3, @end  → @end is at PC 7, offset = 7 - 4 = 3
+        assert_eq!(chunk.code[4].opcode(), Opcode::JMPIFNOT);
+        assert_eq!(chunk.code[4].sbx(), 3);
+        // Instruction 6 (index 6): jmp @loop → @loop is at PC 3, offset = 3 - 6 = -3
+        assert_eq!(chunk.code[6].opcode(), Opcode::JMP);
+        assert_eq!(chunk.code[6].sbx_ab(), -3);
+    }
+
+    #[test]
+    fn round_trips_all_opcode_families() {
+        let source = r#"
+            .module "all"
+            .version 1
+            .entry 0
+
+            .constants
+              0 i64 10
+              1 f64 1.5
+
+            .functions
+              0 "main" regs=6
+                loadk r0, 0
+                loadk r1, 1
+                move r2, r0
+                add.i64 r2, r2, r1
+                sub.i64 r3, r0, r1
+                mul.i64 r4, r0, r1
+                div.i64 r5, r0, r1
+                mul.f64 r0, r1, r1
+                eq.i64 r2, r0, r1
+                lt.i64 r3, r0, r1
+                and.i64 r4, r0, r1
+                shl.i64 r5, r0, r1
+                conv r0, r0, r1
+                halt
+              end
+        "#;
+
+        let module = parse_module(source).unwrap();
+        let text = module_to_text(&module);
+        let reparsed = parse_module(&text).unwrap();
+
+        assert_eq!(module.name, reparsed.name);
+        assert_eq!(module.constants, reparsed.constants);
+        assert_eq!(
+            module.functions[0].chunk.code.len(),
+            reparsed.functions[0].chunk.code.len()
+        );
+        for (a, b) in module.functions[0]
+            .chunk
+            .code
+            .iter()
+            .zip(reparsed.functions[0].chunk.code.iter())
+        {
+            assert_eq!(a, b, "instruction mismatch");
+        }
+    }
+}

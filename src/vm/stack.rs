@@ -112,3 +112,36 @@ impl Default for CallStack {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_chunk(max_regs: u8) -> Rc<Chunk> {
+        Rc::new(Chunk {
+            code: Vec::new(),
+            max_registers: max_regs,
+            source_map: std::collections::BTreeMap::new(),
+        })
+    }
+
+    #[test]
+    fn push_pop_frame() {
+        let mut stack = CallStack::new();
+        stack.push_entry(make_chunk(4), "entry");
+        stack.push_call(make_chunk(2), 0, 1, "child");
+        assert_eq!(stack.depth(), 2);
+        assert_eq!(stack.pop_frame().unwrap().return_base, Some(0));
+        assert_eq!(stack.depth(), 1);
+    }
+
+    #[test]
+    fn frame_register_access_is_checked() {
+        let mut frame = Frame::entry(make_chunk(1), "test");
+        assert!(frame.set(0, VmValue::scalar(Register::from_i64(42))));
+        assert!(!frame.set(1, VmValue::scalar(Register::from_i64(100))));
+        unsafe {
+            assert_eq!(frame.get_scalar(0).unwrap().i64, 42);
+        }
+        assert!(frame.get_scalar(1).is_none());
+    }
+}

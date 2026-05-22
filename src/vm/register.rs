@@ -139,3 +139,58 @@ impl Default for VmValue {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_size() {
+        assert_eq!(size_of::<Register>(), 8);
+    }
+
+    #[test]
+    fn test_register_zero() {
+        let r = Register::zero();
+        unsafe {
+            assert_eq!(r.bits, 0);
+            assert_eq!(r.i64, 0);
+            assert_eq!(r.f64, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_register_i64() {
+        let r = Register::from_i64(-42);
+        unsafe {
+            assert_eq!(r.i64, -42);
+        }
+    }
+
+    #[test]
+    fn test_register_f64() {
+        let r = Register::from_f64(1.25);
+        unsafe {
+            assert_eq!(r.f64, 1.25);
+        }
+    }
+
+    #[test]
+    fn test_register_bool() {
+        let t = Register::from_bool(true);
+        let f = Register::from_bool(false);
+        unsafe {
+            assert_eq!(t.u64, 1);
+            assert_eq!(f.u64, 0);
+        }
+    }
+
+    #[test]
+    fn test_register_overlap() {
+        let r = Register::from_i64(0x0102030405060708);
+        unsafe {
+            assert_eq!(r.i8, 0x08);
+            assert_eq!(r.i16, 0x0708);
+            assert_eq!(r.i32, 0x05060708);
+        }
+    }
+}

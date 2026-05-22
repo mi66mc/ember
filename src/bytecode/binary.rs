@@ -291,3 +291,37 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::text::parse_module;
+
+    #[test]
+    fn round_trips_module() {
+        let module = parse_module(
+            r#"
+            .module "hello"
+            .version 1
+            .entry 0
+            .import
+              io.print_i64
+            .constants
+              0 i64 42
+            .callables
+              0 io.print_i64
+            .functions
+              0 "main" regs=2
+                closure r0, 0
+                loadk r1, 0
+                call r0, 1, 0
+                halt
+              end
+            "#,
+        )
+        .unwrap();
+        let encoded = encode_module(&module).unwrap();
+        let decoded = decode_module(&encoded).unwrap();
+        assert_eq!(decoded.name, "hello");
+        assert_eq!(decoded.functions[0].chunk.code.len(), 4);
+    }
+}

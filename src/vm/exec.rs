@@ -767,3 +767,239 @@ impl Vm {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{Constant, Instruction};
+
+    fn run_module(module: Module) -> Result<Vm, VMError> {
+        let mut vm = Vm::new(1024);
+        vm.run_module(module)?;
+        Ok(vm)
+    }
+
+    fn module_for(chunk: Chunk) -> Module {
+        let mut module = Module::new("test");
+        module.entry = Some(0);
+        module.functions.push(Function { 
+            name: "main".to_string(),
+            chunk,
+        });
+        module
+    }
+
+    #[test]
+    fn halt_finishes_run() {
+        let mut chunk = Chunk::new();
+        chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+        assert!(run_module(module_for(chunk)).is_ok());
+    }
+
+    #[test]
+    fn arithmetic_and_comparison_work() {
+        let mut chunk = Chunk::new();
+        chunk.max_registers = 4;
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        chunk.emit(Instruction::abx(Opcode::LOADK, 1, 1));
+        chunk.emit(Instruction::abc(Opcode::ADD_I64, 2, 0, 1));
+        chunk.emit(Instruction::abc(Opcode::LT_I64, 3, 0, 1));
+
+        let mut module = module_for(chunk);
+        module.constants.push(Constant::I64(10));
+        module.constants.push(Constant::I64(20));
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+        vm.step().unwrap();
+        vm.step().unwrap();
+        vm.step().unwrap();
+        vm.step().unwrap();
+
+        unsafe {
+            assert_eq!(vm.scalar(2).unwrap().i64, 30);
+            assert_eq!(vm.scalar(3).unwrap().u64, 1);
+        }
+    }
+
+    #[test]
+    fn call_with_args_and_one_return() {
+        let mut add = Chunk::new();
+        add.max_registers = 3;
+        add.emit(Instruction::abc(Opcode::ADD_I64, 2, 0, 1));
+        add.emit(Instruction::abc(Opcode::RET, 2, 1, 0));
+
+        let mut main = Chunk::new();
+        main.max_registers = 4;
+        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
+        main.emit(Instruction::abx(Opcode::LOADK, 1, 0));
+        main.emit(Instruction::abx(Opcode::LOADK, 2, 1));
+        main.emit(Instruction::abc(Opcode::CALL, 0, 2, 1));
+        main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = Module::new("test");
+        module.entry = Some(0);
+        module.constants = vec![Constant::I64(10), Constant::I64(20)];
+        module.callables = vec![Callable::Function(1)];
+        module.functions.push(Function { 
+            name: "main".to_string(),
+            chunk: main,
+        });
+        module.functions.push(Function { 
+            name: "add".to_string(),
+            chunk: add,
+        });
+
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+        loop {
+            match vm.step() {
+                Ok(()) => {}
+                Err(VMError::Halted) => break,
+                Err(error) => panic!("unexpected error: {error:?}"),
+            }
+        }
+
+        unsafe {
+            assert_eq!(vm.scalar(0).unwrap().i64, 30);
+        }
+    }
+
+    #[test]
+    fn call_with_multiple_returns() {
+        let mut pair = Chunk::new();
+        pair.max_registers = 2;
+        pair.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        pair.emit(Instruction::abx(Opcode::LOADK, 1, 1));
+        pair.emit(Instruction::abc(Opcode::RET, 0, 2, 0));
+
+        let mut main = Chunk::new();
+        main.max_registers = 3;
+        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
+        main.emit(Instruction::abc(Opcode::CALL, 0, 0, 2));
+        main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = Module::new("test");
+        module.entry = Some(0);
+        module.constants = vec![Constant::I64(1), Constant::I64(2)];
+        module.callables = vec![Callable::Function(1)];
+        module.functions.push(Function { 
+            name: "main".to_string(),
+            chunk: main,
+        });
+        module.functions.push(Function { 
+            name: "pair".to_string(),
+            chunk: pair,
+        });
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+        while !matches!(vm.step(), Err(VMError::Halted)) {}
+
+        unsafe {
+            assert_eq!(vm.scalar(0).unwrap().i64, 1);
+            assert_eq!(vm.scalar(1).unwrap().i64, 2);
+        }
+    }
+
+    #[test]
+    fn nested_calls_return_to_callers() {
+        let mut leaf = Chunk::new();
+        leaf.max_registers = 1;
+        leaf.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        leaf.emit(Instruction::abc(Opcode::RET, 0, 1, 0));
+
+        let mut middle = Chunk::new();
+        middle.max_registers = 1;
+        middle.emit(Instruction::abx(Opcode::CLOSURE, 0, 1));
+        middle.emit(Instruction::abc(Opcode::CALL, 0, 0, 1));
+        middle.emit(Instruction::abc(Opcode::RET, 0, 1, 0));
+
+        let mut main = Chunk::new();
+        main.max_registers = 1;
+        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
+        main.emit(Instruction::abc(Opcode::CALL, 0, 0, 1));
+        main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = Module::new("test");
+        module.entry = Some(0);
+        module.constants = vec![Constant::I64(7)];
+        module.callables = vec![Callable::Function(1), Callable::Function(2)];
+        module.functions.push(Function { 
+            name: "main".to_string(),
+            chunk: main,
+        });
+        module.functions.push(Function { 
+            name: "middle".to_string(),
+            chunk: middle,
+        });
+        module.functions.push(Function { 
+            name: "leaf".to_string(),
+            chunk: leaf,
+        });
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+        while !matches!(vm.step(), Err(VMError::Halted)) {}
+
+        unsafe {
+            assert_eq!(vm.scalar(0).unwrap().i64, 7);
+        }
+    }
+
+    #[test]
+    fn invalid_call_target_is_reported() {
+        let mut chunk = Chunk::new();
+        chunk.max_registers = 1;
+        chunk.emit(Instruction::abc(Opcode::CALL, 0, 0, 0));
+
+        let mut vm = Vm::new(1024);
+        vm.stack.push_entry(Rc::new(chunk), "test");
+        assert_eq!(vm.step(), Err(VMError::ExpectedFunction(0)));
+    }
+
+    #[test]
+    fn invalid_pc_register_and_memory_are_reported() {
+        let mut empty = Chunk::new();
+        empty.max_registers = 1;
+        let mut vm = Vm::new(8);
+        vm.stack.push_entry(Rc::new(empty), "test");
+        assert_eq!(
+            vm.step(),
+            Err(VMError::InvalidProgramCounter { pc: 0, len: 0 })
+        );
+
+        let mut bad_reg = Chunk::new();
+        bad_reg.max_registers = 1;
+        bad_reg.emit(Instruction::abx(Opcode::LOADK, 2, 0));
+        let mut vm = Vm::new(8);
+        let mut module = module_for(bad_reg);
+        module.constants.push(Constant::I64(1));
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+        assert_eq!(vm.step(), Err(VMError::InvalidRegister(2)));
+
+        let mut bad_mem = Chunk::new();
+        bad_mem.max_registers = 2;
+        bad_mem.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        bad_mem.emit(Instruction::abx(Opcode::LOADK, 1, 1));
+        bad_mem.emit(Instruction::abc(Opcode::STORE_I64, 0, 0, 1));
+        let mut vm = Vm::new(8);
+        let mut module = module_for(bad_mem);
+        module.constants = vec![Constant::I64(4), Constant::I64(9)];
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+        vm.step().unwrap();
+        vm.step().unwrap();
+        assert_eq!(
+            vm.step(),
+            Err(VMError::MemoryOutOfBounds { addr: 4, size: 8 })
+        );
+    }
+}
