@@ -2,43 +2,39 @@
 .version 1
 .entry 0
 
-.natives
-  0 "std.print_i64"
-  1 "std.print_str"
+.import
+  io.print_i64
 
 .constants
   0 i64 1
   1 i64 5
   2 i64 0
-  3 string "sum 1..5"
 
 .callables
   0 function 1
-  1 native 0
-  2 native 1
+  1 io.print_i64
 
 .functions
   0 "main" regs=4
-    0000 closure r0, 2
-    0001 loadk r1, 3
-    0002 call r0, 1, 0
-    0003 closure r0, 0
-    0004 loadk r1, 1
-    0005 call r0, 1, 1
-    0006 closure r1, 1
-    0007 move r2, r0, r0
-    0008 call r1, 1, 0
-    0009 halt
+    closure r0, 0
+    loadk r1, 1
+    call r0, 1, 1
+    closure r1, 1
+    move r2, r0
+    call r1, 1, 0
+    halt
   end
 
   1 "sum_to" regs=5
-    0000 loadk r1, 0
-    0001 loadk r2, 2
-    0002 gt.i64 r3, r1, r0
-    0003 jmpif r3, 5
-    0004 add.i64 r2, r2, r1
-    0005 loadk r4, 0
-    0006 add.i64 r1, r1, r4
-    0007 jmp -5
-    0008 ret r2, 1
+    loadk r1, 0
+    loadk r2, 2
+    @loop:
+    gt.i64 r3, r1, r0
+    jmpif r3, @end
+    add.i64 r2, r2, r1
+    loadk r4, 0
+    add.i64 r1, r1, r4
+    jmp @loop
+    @end:
+    ret r2, 1
   end

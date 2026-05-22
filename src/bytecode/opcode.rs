@@ -203,6 +203,7 @@ opcodes! {
     GETG = 0xE0,
     SETG = 0xE1,
 
+    EXT = 0xFD,
     NOP = 0xFE,
     HALT = 0xFF,
 }

@@ -2,19 +2,19 @@
 .version 1
 .entry 0
 
-.natives
-  0 "std.print_i64"
+.import
+  io.print_i64
 
 .constants
   0 i64 123
 
 .callables
-  0 native 0
+  0 io.print_i64
 
 .functions
   0 "main" regs=2
-    0000 closure r0, 0
-    0001 loadk r1, 0
-    0002 call r0, 1, 0
-    0003 halt
+    closure r0, 0
+    loadk r1, 0
+    call r0, 1, 0
+    halt
   end

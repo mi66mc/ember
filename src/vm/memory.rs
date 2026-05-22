@@ -8,12 +8,14 @@
 
 pub struct Memory {
     data: Vec<u8>,
+    bump: usize,
 }
 
 impl Memory {
     pub fn new(initial_size: usize) -> Self {
         Memory {
             data: vec![0; initial_size],
+            bump: 0,
         }
     }
 
@@ -21,11 +23,32 @@ impl Memory {
         self.data.len()
     }
 
-    // grow memory by n bytes, returns old size
     pub fn grow(&mut self, bytes: usize) -> usize {
         let old = self.data.len();
         self.data.resize(old + bytes, 0);
         old
+    }
+
+    pub fn alloc(&mut self, size: usize) -> usize {
+        let end = self.bump + size;
+        if end > self.data.len() {
+            self.grow(end - self.data.len());
+        }
+        let ptr = self.bump;
+        self.bump = end;
+        ptr
+    }
+
+    pub fn free(&mut self, _ptr: usize) {
+        // no-op bump allocator
+    }
+
+    pub fn reset(&mut self) {
+        self.bump = 0;
+    }
+
+    pub fn bump_ptr(&self) -> usize {
+        self.bump
     }
 
     // ─────────────────────────────────────────

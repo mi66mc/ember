@@ -6,28 +6,30 @@ use crate::vm::register::{Register, VmValue};
 pub struct Frame {
     pub chunk: Rc<Chunk>,
     pub pc: usize,
-    pub registers: Vec<VmValue>,
+    pub registers: Box<[VmValue]>,
     pub return_base: Option<u8>,
     pub expected_returns: u8,
+    pub function_name: String,
 }
 
 impl Frame {
-    pub fn entry(chunk: Rc<Chunk>) -> Self {
-        Self::new(chunk, None, 0)
+    pub fn entry(chunk: Rc<Chunk>, name: impl Into<String>) -> Self {
+        Self::new(chunk, None, 0, name)
     }
 
-    pub fn call(chunk: Rc<Chunk>, return_base: u8, expected_returns: u8) -> Self {
-        Self::new(chunk, Some(return_base), expected_returns)
+    pub fn call(chunk: Rc<Chunk>, return_base: u8, expected_returns: u8, name: impl Into<String>) -> Self {
+        Self::new(chunk, Some(return_base), expected_returns, name)
     }
 
-    fn new(chunk: Rc<Chunk>, return_base: Option<u8>, expected_returns: u8) -> Self {
+    fn new(chunk: Rc<Chunk>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
         let num_regs = chunk.max_registers as usize;
         Frame {
             chunk,
             pc: 0,
-            registers: vec![VmValue::default(); num_regs],
+            registers: vec![VmValue::default(); num_regs].into_boxed_slice(),
             return_base,
             expected_returns,
+            function_name: name.into(),
         }
     }
 
@@ -58,13 +60,13 @@ impl CallStack {
         CallStack { frames: Vec::new() }
     }
 
-    pub fn push_entry(&mut self, chunk: Rc<Chunk>) {
-        self.frames.push(Frame::entry(chunk));
+    pub fn push_entry(&mut self, chunk: Rc<Chunk>, name: impl Into<String>) {
+        self.frames.push(Frame::entry(chunk, name));
     }
 
-    pub fn push_call(&mut self, chunk: Rc<Chunk>, return_base: u8, expected_returns: u8) {
+    pub fn push_call(&mut self, chunk: Rc<Chunk>, return_base: u8, expected_returns: u8, name: impl Into<String>) {
         self.frames
-            .push(Frame::call(chunk, return_base, expected_returns));
+            .push(Frame::call(chunk, return_base, expected_returns, name));
     }
 
     pub fn pop_frame(&mut self) -> Option<Frame> {
@@ -81,6 +83,10 @@ impl CallStack {
 
     pub fn depth(&self) -> usize {
         self.frames.len()
+    }
+
+    pub fn frames(&self) -> &[Frame] {
+        &self.frames
     }
 
     pub fn is_empty(&self) -> bool {
@@ -120,8 +126,8 @@ mod tests {
     #[test]
     fn push_pop_frame() {
         let mut stack = CallStack::new();
-        stack.push_entry(make_chunk(4));
-        stack.push_call(make_chunk(2), 0, 1);
+        stack.push_entry(make_chunk(4), "entry");
+        stack.push_call(make_chunk(2), 0, 1, "child");
         assert_eq!(stack.depth(), 2);
         assert_eq!(stack.pop_frame().unwrap().return_base, Some(0));
         assert_eq!(stack.depth(), 1);
@@ -129,7 +135,7 @@ mod tests {
 
     #[test]
     fn frame_register_access_is_checked() {
-        let mut frame = Frame::entry(make_chunk(1));
+        let mut frame = Frame::entry(make_chunk(1), "test");
         assert!(frame.set(0, VmValue::scalar(Register::from_i64(42))));
         assert!(!frame.set(1, VmValue::scalar(Register::from_i64(100))));
         unsafe {

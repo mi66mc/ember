@@ -1,0 +1,24 @@
+.module "main"
+.entry 0
+
+.import
+  io.print_i64
+  "lib.embt".double
+
+.constants
+  0 i64 21
+
+.callables
+  0 "lib.embt".double
+  1 io.print_i64
+
+.functions
+  0 "main" regs=4
+    loadk r1, 0
+    closure r0, 0
+    call r0, 1, 1
+    closure r2, 1
+    move r3, r0
+    call r2, 1, 0
+    halt
+  end

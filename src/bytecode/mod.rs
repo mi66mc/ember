@@ -10,6 +10,6 @@ pub mod value;
 pub use builder::Builder;
 pub use chunk::Chunk;
 pub use instruction::Instruction;
-pub use module::{Callable, Function, Module, NativeImport};
+pub use module::{Callable, Function, Module};
 pub use opcode::Opcode;
 pub use value::{Constant, ValueType};

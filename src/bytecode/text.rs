@@ -1,6 +1,7 @@
 use crate::bytecode::{
-    Callable, Chunk, Constant, Function, Instruction, Module, NativeImport, Opcode,
+    Callable, Chunk, Constant, Function, Instruction, Module, Opcode,
 };
+use crate::vm::native::ImportDecl;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextError {
@@ -30,7 +31,7 @@ impl std::error::Error for TextError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     None,
-    Natives,
+    Imports,
     Constants,
     Callables,
     Functions,
@@ -39,7 +40,7 @@ enum Section {
 pub fn parse_module(source: &str) -> Result<Module, TextError> {
     let mut module = Module::new("main");
     let mut section = Section::None;
-    let mut current_function: Option<Function> = None;
+    let mut pending_function: Option<(Function, Vec<String>, Vec<usize>)> = None;
 
     for (idx, raw) in source.lines().enumerate() {
         let line_no = idx + 1;
@@ -48,19 +49,20 @@ pub fn parse_module(source: &str) -> Result<Module, TextError> {
             continue;
         }
 
-        if let Some(function) = current_function.as_mut() {
+        if let Some((ref _func, ref mut body_lines, ref mut body_line_nos)) = pending_function {
             if line == "end" {
-                module
-                    .functions
-                    .push(current_function.take().expect("function exists"));
+                let (func, body_lines, body_line_nos) = pending_function.take().unwrap();
+                let function = parse_function_body(func, &body_lines, &body_line_nos)?;
+                module.functions.push(function);
             } else {
-                parse_instruction_line(&line, line_no, &mut function.chunk)?;
+                body_lines.push(line);
+                body_line_nos.push(line_no);
             }
             continue;
         }
 
         match line.as_str() {
-            ".natives" => section = Section::Natives,
+            ".import" => section = Section::Imports,
             ".constants" => section = Section::Constants,
             ".callables" => section = Section::Callables,
             ".functions" => section = Section::Functions,
@@ -80,11 +82,12 @@ pub fn parse_module(source: &str) -> Result<Module, TextError> {
                     .map_err(|_| TextError::new(line_no, 1, "invalid entry function id"))?;
             }
             _ => match section {
-                Section::Natives => parse_native(&line, line_no, &mut module)?,
+                Section::Imports => parse_import(&line, line_no, &mut module)?,
                 Section::Constants => parse_constant_entry(&line, line_no, &mut module)?,
                 Section::Callables => parse_callable(&line, line_no, &mut module)?,
                 Section::Functions => {
-                    current_function = Some(parse_function_header(&line, line_no)?);
+                    let func = parse_function_header(&line, line_no)?;
+                    pending_function = Some((func, Vec::new(), Vec::new()));
                 }
                 Section::None => {
                     return Err(TextError::new(
@@ -97,15 +100,158 @@ pub fn parse_module(source: &str) -> Result<Module, TextError> {
         }
     }
 
-    if current_function.is_some() {
+    if pending_function.is_some() {
         return Err(TextError::new(
             source.lines().count(),
             1,
             "unterminated function",
         ));
     }
-    validate_module(&module).map_err(|message| TextError::new(1, 1, message))?;
     Ok(module)
+}
+
+fn parse_function_body(
+    mut function: Function,
+    body_lines: &[String],
+    body_line_nos: &[usize],
+) -> Result<Function, TextError> {
+    use std::collections::HashMap;
+
+    // Pass 1: collect label positions
+    let mut labels: HashMap<String, usize> = HashMap::new();
+    {
+        let mut pc: usize = 0;
+        for (i, line) in body_lines.iter().enumerate() {
+            let line_no = body_line_nos[i];
+            let tokens = tokenize(line, line_no)?;
+            if tokens.is_empty() {
+                continue;
+            }
+            let first = tokens[0].as_str();
+            if let Some(label_name) = first.strip_suffix(':') {
+                if label_name.starts_with('@') && label_name.len() > 1 {
+                    let name = label_name[1..].to_string();
+                    if labels.contains_key(&name) {
+                        return Err(TextError::new(line_no, 1, format!("duplicate label @{name}")));
+                    }
+                    labels.insert(name, pc);
+                    // Check if there's an instruction after the label on the same line
+                    if tokens.len() > 1 {
+                        let rest: Vec<String> = tokens[1..].to_vec();
+                        if is_instruction(&rest) {
+                            pc += 1;
+                        }
+                    }
+                }
+            } else if first.starts_with('@') && first.len() > 1 {
+                // Label on its own: @name
+                let name = first[1..].to_string();
+                if labels.contains_key(&name) {
+                    return Err(TextError::new(line_no, 1, format!("duplicate label @{name}")));
+                }
+                labels.insert(name, pc);
+                if tokens.len() > 1 {
+                    let rest: Vec<String> = tokens[1..].to_vec();
+                    if is_instruction(&rest) {
+                        pc += 1;
+                    }
+                }
+            } else if is_instruction(&tokens) {
+                pc += 1;
+            }
+        }
+    }
+
+    // Pass 2: emit instructions with resolved labels
+    for (i, line) in body_lines.iter().enumerate() {
+        let line_no = body_line_nos[i];
+        let tokens = tokenize(line, line_no)?;
+        if tokens.is_empty() {
+            continue;
+        }
+        let first = tokens[0].as_str();
+
+        // Skip label declarations, keep instructions on the same line
+        let instr_tokens: Vec<String> = if first.ends_with(':') && first.starts_with('@') {
+            if tokens.len() > 1 {
+                tokens[1..].to_vec()
+            } else {
+                continue; // Just a label, no instruction
+            }
+        } else if first.starts_with('@') && first.len() > 1 {
+            // Standalone label declaration: @name
+            if tokens.len() > 1 && is_instruction(&tokens[1..]) {
+                tokens[1..].to_vec()
+            } else {
+                continue;
+            }
+        } else {
+            tokens.clone()
+        };
+
+        if instr_tokens.is_empty() || !is_instruction(&instr_tokens) {
+            continue;
+        }
+
+        // Remove PC prefix if present
+        let cleaned_tokens = if instr_tokens[0]
+            .chars()
+            .all(|ch| ch.is_ascii_digit())
+        {
+            instr_tokens[1..].to_vec()
+        } else {
+            instr_tokens
+        };
+
+        // Resolve label references in operands
+        let resolved: Vec<String> = cleaned_tokens
+            .iter()
+            .map(|token| {
+                if let Some(name) = token.strip_prefix('@') {
+                    if let Some(&target_pc) = labels.get(name) {
+                        let current_pc: usize = function.chunk.len();
+                        let offset = target_pc as isize - current_pc as isize;
+                        offset.to_string()
+                    } else {
+                        token.clone()
+                    }
+                } else {
+                    token.clone()
+                }
+            })
+            .collect();
+
+        let instrs = parse_instruction(&resolved, line_no)?;
+        for instr in instrs {
+            function.chunk.emit(instr);
+        }
+    }
+
+    Ok(function)
+}
+
+fn is_instruction(tokens: &[String]) -> bool {
+    if tokens.is_empty() {
+        return false;
+    }
+    let first = tokens[0].as_str();
+    matches!(
+        first,
+        "halt" | "nop" | "ext"
+            | "loadk" | "loadkx"
+            | "closure" | "closurex"
+            | "call"
+            | "ret"
+            | "jmp" | "jmpx"
+            | "jmpif" | "jmpifnot"
+            | "getg"
+            | "setg"
+            | "move"
+            | "conv"
+    ) || first.contains('.')
+        || first
+            .chars()
+            .all(|ch| ch.is_ascii_digit())
 }
 
 pub fn validate_module(module: &Module) -> Result<(), String> {
@@ -114,15 +260,19 @@ pub fn validate_module(module: &Module) -> Result<(), String> {
     }
     for (idx, callable) in module.callables.iter().enumerate() {
         match callable {
-            Callable::Function(function_id) if *function_id as usize >= module.functions.len() => {
+            Callable::Function(function_id)
+                if *function_id as usize >= module.functions.len() =>
+            {
                 return Err(format!(
                     "callable {idx} references missing function {function_id}"
                 ));
             }
-            Callable::Native(native_id) if *native_id as usize >= module.natives.len() => {
-                return Err(format!(
-                    "callable {idx} references missing native {native_id}"
-                ));
+            Callable::Import(id) => {
+                if *id as usize >= module.imports.len() {
+                    return Err(format!(
+                        "callable {idx} references undeclared import index {id}"
+                    ));
+                }
             }
             _ => {}
         }
@@ -139,11 +289,11 @@ pub fn module_to_text(module: &Module) -> String {
     let mut out = String::new();
     out.push_str(&format!(".module \"{}\"\n", escape_string(&module.name)));
     out.push_str(&format!(".version {}\n", module.version));
-    out.push_str(&format!(".entry {}\n\n", module.entry));
+    out.push_str(&format!(".entry {}\n", module.entry));
 
-    out.push_str(".natives\n");
-    for (idx, native) in module.natives.iter().enumerate() {
-        out.push_str(&format!("  {} \"{}\"\n", idx, escape_string(&native.name)));
+    out.push_str("\n.import\n");
+    for import in &module.imports {
+        out.push_str(&format!("  {}\n", import.to_string()));
     }
 
     out.push_str("\n.constants\n");
@@ -155,7 +305,7 @@ pub fn module_to_text(module: &Module) -> String {
     for (idx, callable) in module.callables.iter().enumerate() {
         let rendered = match callable {
             Callable::Function(id) => format!("function {id}"),
-            Callable::Native(id) => format!("native {id}"),
+            Callable::Import(id) => format!("{}", module.imports[*id as usize]),
         };
         out.push_str(&format!("  {} {}\n", idx, rendered));
     }
@@ -168,8 +318,21 @@ pub fn module_to_text(module: &Module) -> String {
             escape_string(&function.name),
             function.chunk.max_registers
         ));
+
+        let max_instr_len = function
+            .chunk
+            .code
+            .iter()
+            .map(|i| format_instruction(i).len())
+            .max()
+            .unwrap_or(0);
+        let comment_col = max_instr_len + 4;
+
         for (pc, instr) in function.chunk.code.iter().enumerate() {
-            out.push_str(&format!("    {:04} {}\n", pc, format_instruction(instr)));
+            let instr_text = format_instruction(instr);
+            out.push_str(&format!(
+                "    {instr_text:<comment_col$} ;; {pc}\n"
+            ));
         }
         out.push_str("  end\n");
     }
@@ -179,25 +342,56 @@ pub fn module_to_text(module: &Module) -> String {
 pub fn format_instruction(instr: &Instruction) -> String {
     match instr.opcode() {
         Opcode::LOADK => format!("loadk r{}, {}", instr.a(), instr.bx()),
-        Opcode::MOVE => format!("move r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::LOAD_I64 => format!("load.i64 r{}, r{}, {}", instr.a(), instr.b(), instr.c()),
-        Opcode::STORE_I64 => format!("store.i64 r{}, {}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::ADD_I64 => format!("add.i64 r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::SUB_I64 => format!("sub.i64 r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::MUL_I64 => format!("mul.i64 r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::DIV_I64 => format!("div.i64 r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::LT_I64 => format!("lt.i64 r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::GT_I64 => format!("gt.i64 r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
-        Opcode::JMP => format!("jmp {}", instr.sbx_ab()),
-        Opcode::JMPIF => format!("jmpif r{}, {}", instr.a(), instr.sbx()),
-        Opcode::JMPIFNOT => format!("jmpifnot r{}, {}", instr.a(), instr.sbx()),
+        Opcode::MOVE => format!("move r{}, r{}", instr.a(), instr.b()),
         Opcode::CLOSURE => format!("closure r{}, {}", instr.a(), instr.bx()),
         Opcode::CALL => format!("call r{}, {}, {}", instr.a(), instr.b(), instr.c()),
         Opcode::RET => format!("ret r{}, {}", instr.a(), instr.b()),
+        Opcode::JMP => format!("jmp {}", instr.sbx_ab()),
+        Opcode::JMPIF => format!("jmpif r{}, {}", instr.a(), instr.sbx()),
+        Opcode::JMPIFNOT => format!("jmpifnot r{}, {}", instr.a(), instr.sbx()),
+        Opcode::GETG => format!("getg r{}, {}", instr.a(), instr.bx()),
+        Opcode::SETG => format!("setg r{}, {}", instr.a(), instr.bx()),
         Opcode::NOP => "nop".to_string(),
         Opcode::HALT => "halt".to_string(),
-        op => format!("{:?} {}, {}, {}", op, instr.a(), instr.b(), instr.c()),
+        Opcode::EXT => "ext".to_string(),
+        Opcode::CONV => format!("conv r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
+
+        op => {
+            let name = lowercase_opcode(op);
+            match op {
+                Opcode::LOAD_I8
+                | Opcode::LOAD_I16
+                | Opcode::LOAD_I32
+                | Opcode::LOAD_I64
+                | Opcode::LOAD_U8
+                | Opcode::LOAD_U16
+                | Opcode::LOAD_U32
+                | Opcode::LOAD_U64
+                | Opcode::LOAD_F32
+                | Opcode::LOAD_F64 => {
+                    format!("{name} r{}, r{}, {}", instr.a(), instr.b(), instr.c())
+                }
+                Opcode::STORE_I8
+                | Opcode::STORE_I16
+                | Opcode::STORE_I32
+                | Opcode::STORE_I64
+                | Opcode::STORE_U8
+                | Opcode::STORE_U16
+                | Opcode::STORE_U32
+                | Opcode::STORE_U64
+                | Opcode::STORE_F32
+                | Opcode::STORE_F64 => {
+                    format!("{name} r{}, {}, r{}", instr.a(), instr.b(), instr.c())
+                }
+                _ => format!("{name} r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
+            }
+        }
     }
+}
+
+fn lowercase_opcode(opcode: Opcode) -> String {
+    let debug = format!("{opcode:?}");
+    debug.to_lowercase().replace('_', ".")
 }
 
 fn validate_instruction(
@@ -254,7 +448,7 @@ fn validate_instruction(
                 ));
             }
         }
-        Opcode::HALT | Opcode::NOP | Opcode::JMP => {}
+        Opcode::HALT | Opcode::NOP | Opcode::JMP | Opcode::EXT => {}
         Opcode::JMPIF | Opcode::JMPIFNOT => check_reg(instr.a())?,
         Opcode::LOAD_I8
         | Opcode::LOAD_I16
@@ -291,15 +485,41 @@ fn validate_instruction(
     Ok(())
 }
 
-fn parse_native(line: &str, line_no: usize, module: &mut Module) -> Result<(), TextError> {
+fn parse_import(line: &str, line_no: usize, module: &mut Module) -> Result<(), TextError> {
     let tokens = tokenize(line, line_no)?;
-    expect_len(&tokens, 2, line_no)?;
-    let idx = parse_usize(&tokens[0], line_no)?;
-    ensure_next_index(idx, module.natives.len(), line_no)?;
-    module.natives.push(NativeImport {
-        name: parse_quoted(&tokens[1], line_no)?,
-    });
-    Ok(())
+    // Syntax: `io.print_i64` (native) or `"lib".double` (external)
+    let raw = tokens.join(" ").replace(" .", ".");
+
+    // Check if it's a quoted external: "path".function
+    if raw.starts_with('"') {
+        if let Some(dot_pos) = raw.rfind("\".") {
+            let path = parse_quoted(&raw[..=dot_pos], line_no)?;
+            let function = raw[dot_pos + 2..].trim().to_string();
+            if function.is_empty() {
+                return Err(TextError::new(line_no, 1, "expected function name after path"));
+            }
+            module
+                .imports
+                .push(ImportDecl::external(path, function));
+            return Ok(());
+        }
+        return Err(TextError::new(line_no, 1, "expected external import: \"path\".function"));
+    }
+
+    // Native import: module.function
+    if let Some(dot_pos) = raw.find('.') {
+        let module_name = raw[..dot_pos].trim().to_string();
+        let function = raw[dot_pos + 1..].trim().to_string();
+        if module_name.is_empty() || function.is_empty() {
+            return Err(TextError::new(line_no, 1, "expected `module.function`"));
+        }
+        module
+            .imports
+            .push(ImportDecl::native(module_name, function));
+        return Ok(());
+    }
+
+    Err(TextError::new(line_no, 1, "expected `module.function` or `\"path\".function`"))
 }
 
 fn parse_constant_entry(line: &str, line_no: usize, module: &mut Module) -> Result<(), TextError> {
@@ -317,22 +537,55 @@ fn parse_constant_entry(line: &str, line_no: usize, module: &mut Module) -> Resu
 
 fn parse_callable(line: &str, line_no: usize, module: &mut Module) -> Result<(), TextError> {
     let tokens = tokenize(line, line_no)?;
-    expect_len(&tokens, 3, line_no)?;
+    if tokens.len() < 2 {
+        return Err(TextError::new(line_no, 1, "expected `index function N` or `index mod.func`"));
+    }
     let idx = parse_usize(&tokens[0], line_no)?;
     ensure_next_index(idx, module.callables.len(), line_no)?;
-    let target = parse_u32(&tokens[2], line_no)?;
-    let callable = match tokens[1].as_str() {
-        "function" => Callable::Function(target),
-        "native" => Callable::Native(target),
-        _ => {
-            return Err(TextError::new(
+
+    if tokens[1] == "function" {
+        if tokens.len() < 3 {
+            return Err(TextError::new(line_no, 1, "expected function index"));
+        }
+        module
+            .callables
+            .push(Callable::Function(parse_u32(&tokens[2], line_no)?));
+        return Ok(());
+    }
+
+    // Import reference: `io.print_i64` (native) or `"lib".double` (external)
+    // Reconstruct qualified name — it may be tokenized as one or multiple tokens
+    let raw = tokens[1..].join(" ").replace(" .", ".");
+    let import: ImportDecl = if raw.starts_with('"') {
+        if let Some(dot_pos) = raw.rfind("\".") {
+            let path = parse_quoted(&raw[..=dot_pos], line_no)?;
+            let function = raw[dot_pos + 2..].trim().to_string();
+            ImportDecl::external(path, function)
+        } else {
+            return Err(TextError::new(line_no, 1, "expected external: \"path\".function"));
+        }
+    } else if let Some(dot_pos) = raw.find('.') {
+        let module_name = raw[..dot_pos].trim().to_string();
+        let function = raw[dot_pos + 1..].trim().to_string();
+        ImportDecl::native(module_name, function)
+    } else {
+        return Err(TextError::new(line_no, 1, "expected `module.function`, `\"path\".function`, or `function N`"));
+    };
+
+    // Find matching import declaration
+    let import_idx = module
+        .imports
+        .iter()
+        .position(|i| *i == import)
+        .ok_or_else(|| {
+            TextError::new(
                 line_no,
                 1,
-                "expected callable kind function|native",
-            ));
-        }
-    };
-    module.callables.push(callable);
+                format!("undeclared import `{import}`"),
+            )
+        })?;
+
+    module.callables.push(Callable::Import(import_idx as u32));
     Ok(())
 }
 
@@ -351,71 +604,81 @@ fn parse_function_header(line: &str, line_no: usize) -> Result<Function, TextErr
     Ok(Function { name, chunk })
 }
 
-fn parse_instruction_line(line: &str, line_no: usize, chunk: &mut Chunk) -> Result<(), TextError> {
-    let mut tokens = tokenize(line, line_no)?;
-    if tokens.is_empty() {
-        return Ok(());
-    }
-    if tokens[0].chars().all(|ch| ch.is_ascii_digit()) {
-        tokens.remove(0);
-    }
-    let instr = parse_instruction(&tokens, line_no)?;
-    chunk.emit(instr);
-    Ok(())
-}
-
-fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Instruction, TextError> {
+fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Vec<Instruction>, TextError> {
     let op = tokens
         .first()
         .ok_or_else(|| TextError::new(line_no, 1, "empty instruction"))?
         .as_str();
-    match op {
-        "halt" => Ok(Instruction::abc(Opcode::HALT, 0, 0, 0)),
-        "nop" => Ok(Instruction::abc(Opcode::NOP, 0, 0, 0)),
+    let result: Vec<Instruction> = match op {
+        "halt" => vec![Instruction::abc(Opcode::HALT, 0, 0, 0)],
+        "nop" => vec![Instruction::abc(Opcode::NOP, 0, 0, 0)],
         "loadk" => {
             expect_len(tokens, 3, line_no)?;
-            Ok(Instruction::abx(
+            vec![Instruction::abx(
                 Opcode::LOADK,
                 parse_reg(&tokens[1], line_no)?,
                 parse_u16(&tokens[2], line_no)?,
-            ))
+            )]
+        }
+        "loadkx" => {
+            expect_len(tokens, 3, line_no)?;
+            let (ext, instr) = emit_ext_abx(
+                Opcode::LOADK,
+                parse_reg(&tokens[1], line_no)?,
+                parse_u32(&tokens[2], line_no)?,
+            )?;
+            vec![ext, instr]
         }
         "closure" => {
             expect_len(tokens, 3, line_no)?;
-            Ok(Instruction::abx(
+            vec![Instruction::abx(
                 Opcode::CLOSURE,
                 parse_reg(&tokens[1], line_no)?,
                 parse_u16(&tokens[2], line_no)?,
-            ))
+            )]
+        }
+        "closurex" => {
+            expect_len(tokens, 3, line_no)?;
+            let (ext, instr) = emit_ext_abx(
+                Opcode::CLOSURE,
+                parse_reg(&tokens[1], line_no)?,
+                parse_u32(&tokens[2], line_no)?,
+            )?;
+            vec![ext, instr]
         }
         "call" => {
             expect_len(tokens, 4, line_no)?;
-            Ok(Instruction::abc(
+            vec![Instruction::abc(
                 Opcode::CALL,
                 parse_reg(&tokens[1], line_no)?,
                 parse_u8(&tokens[2], line_no)?,
                 parse_u8(&tokens[3], line_no)?,
-            ))
+            )]
         }
         "ret" => {
             expect_len(tokens, 3, line_no)?;
-            Ok(Instruction::abc(
+            vec![Instruction::abc(
                 Opcode::RET,
                 parse_reg(&tokens[1], line_no)?,
                 parse_u8(&tokens[2], line_no)?,
                 0,
-            ))
+            )]
         }
         "jmp" => {
             expect_len(tokens, 2, line_no)?;
-            Ok(Instruction::jmp(
+            vec![Instruction::jmp(
                 Opcode::JMP,
                 parse_i16(&tokens[1], line_no)?,
-            ))
+            )]
+        }
+        "jmpx" => {
+            expect_len(tokens, 2, line_no)?;
+            let (ext, instr) = emit_ext_jmp(parse_i32(&tokens[1], line_no)?)?;
+            vec![ext, instr]
         }
         "jmpif" | "jmpifnot" => {
             expect_len(tokens, 3, line_no)?;
-            Ok(Instruction::asbx(
+            vec![Instruction::asbx(
                 if op == "jmpif" {
                     Opcode::JMPIF
                 } else {
@@ -423,23 +686,208 @@ fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Instruction, T
                 },
                 parse_reg(&tokens[1], line_no)?,
                 parse_i16(&tokens[2], line_no)?,
+            )]
+        }
+        "getg" => {
+            expect_len(tokens, 3, line_no)?;
+            vec![Instruction::abx(
+                Opcode::GETG,
+                parse_reg(&tokens[1], line_no)?,
+                parse_u16(&tokens[2], line_no)?,
+            )]
+        }
+        "setg" => {
+            expect_len(tokens, 3, line_no)?;
+            vec![Instruction::abx(
+                Opcode::SETG,
+                parse_reg(&tokens[1], line_no)?,
+                parse_u16(&tokens[2], line_no)?,
+            )]
+        }
+        "move" => {
+            expect_len(tokens, 3, line_no)?;
+            vec![Instruction::abc(
+                Opcode::MOVE,
+                parse_reg(&tokens[1], line_no)?,
+                parse_reg(&tokens[2], line_no)?,
+                0,
+            )]
+        }
+        "conv" => vec![abc(tokens, line_no, Opcode::CONV)?],
+
+        "load.i8" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I8)?],
+        "load.i16" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I16)?],
+        "load.i32" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I32)?],
+        "load.i64" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I64)?],
+        "load.u8" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U8)?],
+        "load.u16" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U16)?],
+        "load.u32" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U32)?],
+        "load.u64" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U64)?],
+        "load.f32" => vec![abc_rri(tokens, line_no, Opcode::LOAD_F32)?],
+        "load.f64" => vec![abc_rri(tokens, line_no, Opcode::LOAD_F64)?],
+
+        "store.i8" => vec![abc_rir(tokens, line_no, Opcode::STORE_I8)?],
+        "store.i16" => vec![abc_rir(tokens, line_no, Opcode::STORE_I16)?],
+        "store.i32" => vec![abc_rir(tokens, line_no, Opcode::STORE_I32)?],
+        "store.i64" => vec![abc_rir(tokens, line_no, Opcode::STORE_I64)?],
+        "store.u8" => vec![abc_rir(tokens, line_no, Opcode::STORE_U8)?],
+        "store.u16" => vec![abc_rir(tokens, line_no, Opcode::STORE_U16)?],
+        "store.u32" => vec![abc_rir(tokens, line_no, Opcode::STORE_U32)?],
+        "store.u64" => vec![abc_rir(tokens, line_no, Opcode::STORE_U64)?],
+        "store.f32" => vec![abc_rir(tokens, line_no, Opcode::STORE_F32)?],
+        "store.f64" => vec![abc_rir(tokens, line_no, Opcode::STORE_F64)?],
+
+        "add.i8" => vec![abc(tokens, line_no, Opcode::ADD_I8)?],
+        "add.i16" => vec![abc(tokens, line_no, Opcode::ADD_I16)?],
+        "add.i32" => vec![abc(tokens, line_no, Opcode::ADD_I32)?],
+        "add.i64" => vec![abc(tokens, line_no, Opcode::ADD_I64)?],
+        "sub.i8" => vec![abc(tokens, line_no, Opcode::SUB_I8)?],
+        "sub.i16" => vec![abc(tokens, line_no, Opcode::SUB_I16)?],
+        "sub.i32" => vec![abc(tokens, line_no, Opcode::SUB_I32)?],
+        "sub.i64" => vec![abc(tokens, line_no, Opcode::SUB_I64)?],
+        "mul.i8" => vec![abc(tokens, line_no, Opcode::MUL_I8)?],
+        "mul.i16" => vec![abc(tokens, line_no, Opcode::MUL_I16)?],
+        "mul.i32" => vec![abc(tokens, line_no, Opcode::MUL_I32)?],
+        "mul.i64" => vec![abc(tokens, line_no, Opcode::MUL_I64)?],
+        "div.i8" => vec![abc(tokens, line_no, Opcode::DIV_I8)?],
+        "div.i16" => vec![abc(tokens, line_no, Opcode::DIV_I16)?],
+        "div.i32" => vec![abc(tokens, line_no, Opcode::DIV_I32)?],
+        "div.i64" => vec![abc(tokens, line_no, Opcode::DIV_I64)?],
+        "mod.i8" => vec![abc(tokens, line_no, Opcode::MOD_I8)?],
+        "mod.i16" => vec![abc(tokens, line_no, Opcode::MOD_I16)?],
+        "mod.i32" => vec![abc(tokens, line_no, Opcode::MOD_I32)?],
+        "mod.i64" => vec![abc(tokens, line_no, Opcode::MOD_I64)?],
+        "neg.i8" => vec![abc(tokens, line_no, Opcode::NEG_I8)?],
+        "neg.i16" => vec![abc(tokens, line_no, Opcode::NEG_I16)?],
+        "neg.i32" => vec![abc(tokens, line_no, Opcode::NEG_I32)?],
+        "neg.i64" => vec![abc(tokens, line_no, Opcode::NEG_I64)?],
+
+        "add.u8" => vec![abc(tokens, line_no, Opcode::ADD_U8)?],
+        "add.u16" => vec![abc(tokens, line_no, Opcode::ADD_U16)?],
+        "add.u32" => vec![abc(tokens, line_no, Opcode::ADD_U32)?],
+        "add.u64" => vec![abc(tokens, line_no, Opcode::ADD_U64)?],
+        "sub.u8" => vec![abc(tokens, line_no, Opcode::SUB_U8)?],
+        "sub.u16" => vec![abc(tokens, line_no, Opcode::SUB_U16)?],
+        "sub.u32" => vec![abc(tokens, line_no, Opcode::SUB_U32)?],
+        "sub.u64" => vec![abc(tokens, line_no, Opcode::SUB_U64)?],
+        "mul.u8" => vec![abc(tokens, line_no, Opcode::MUL_U8)?],
+        "mul.u16" => vec![abc(tokens, line_no, Opcode::MUL_U16)?],
+        "mul.u32" => vec![abc(tokens, line_no, Opcode::MUL_U32)?],
+        "mul.u64" => vec![abc(tokens, line_no, Opcode::MUL_U64)?],
+        "div.u8" => vec![abc(tokens, line_no, Opcode::DIV_U8)?],
+        "div.u16" => vec![abc(tokens, line_no, Opcode::DIV_U16)?],
+        "div.u32" => vec![abc(tokens, line_no, Opcode::DIV_U32)?],
+        "div.u64" => vec![abc(tokens, line_no, Opcode::DIV_U64)?],
+        "mod.u8" => vec![abc(tokens, line_no, Opcode::MOD_U8)?],
+        "mod.u16" => vec![abc(tokens, line_no, Opcode::MOD_U16)?],
+        "mod.u32" => vec![abc(tokens, line_no, Opcode::MOD_U32)?],
+        "mod.u64" => vec![abc(tokens, line_no, Opcode::MOD_U64)?],
+
+        "add.f32" => vec![abc(tokens, line_no, Opcode::ADD_F32)?],
+        "add.f64" => vec![abc(tokens, line_no, Opcode::ADD_F64)?],
+        "sub.f32" => vec![abc(tokens, line_no, Opcode::SUB_F32)?],
+        "sub.f64" => vec![abc(tokens, line_no, Opcode::SUB_F64)?],
+        "mul.f32" => vec![abc(tokens, line_no, Opcode::MUL_F32)?],
+        "mul.f64" => vec![abc(tokens, line_no, Opcode::MUL_F64)?],
+        "div.f32" => vec![abc(tokens, line_no, Opcode::DIV_F32)?],
+        "div.f64" => vec![abc(tokens, line_no, Opcode::DIV_F64)?],
+        "neg.f32" => vec![abc(tokens, line_no, Opcode::NEG_F32)?],
+        "neg.f64" => vec![abc(tokens, line_no, Opcode::NEG_F64)?],
+
+        "and.i8" => vec![abc(tokens, line_no, Opcode::AND_I8)?],
+        "and.i16" => vec![abc(tokens, line_no, Opcode::AND_I16)?],
+        "and.i32" => vec![abc(tokens, line_no, Opcode::AND_I32)?],
+        "and.i64" => vec![abc(tokens, line_no, Opcode::AND_I64)?],
+        "or.i8" => vec![abc(tokens, line_no, Opcode::OR_I8)?],
+        "or.i16" => vec![abc(tokens, line_no, Opcode::OR_I16)?],
+        "or.i32" => vec![abc(tokens, line_no, Opcode::OR_I32)?],
+        "or.i64" => vec![abc(tokens, line_no, Opcode::OR_I64)?],
+        "xor.i8" => vec![abc(tokens, line_no, Opcode::XOR_I8)?],
+        "xor.i16" => vec![abc(tokens, line_no, Opcode::XOR_I16)?],
+        "xor.i32" => vec![abc(tokens, line_no, Opcode::XOR_I32)?],
+        "xor.i64" => vec![abc(tokens, line_no, Opcode::XOR_I64)?],
+        "not.i8" => vec![abc(tokens, line_no, Opcode::NOT_I8)?],
+        "not.i16" => vec![abc(tokens, line_no, Opcode::NOT_I16)?],
+        "not.i32" => vec![abc(tokens, line_no, Opcode::NOT_I32)?],
+        "not.i64" => vec![abc(tokens, line_no, Opcode::NOT_I64)?],
+
+        "shl.i8" => vec![abc(tokens, line_no, Opcode::SHL_I8)?],
+        "shl.i16" => vec![abc(tokens, line_no, Opcode::SHL_I16)?],
+        "shl.i32" => vec![abc(tokens, line_no, Opcode::SHL_I32)?],
+        "shl.i64" => vec![abc(tokens, line_no, Opcode::SHL_I64)?],
+        "shr.i8" => vec![abc(tokens, line_no, Opcode::SHR_I8)?],
+        "shr.i16" => vec![abc(tokens, line_no, Opcode::SHR_I16)?],
+        "shr.i32" => vec![abc(tokens, line_no, Opcode::SHR_I32)?],
+        "shr.i64" => vec![abc(tokens, line_no, Opcode::SHR_I64)?],
+        "ushr.i8" => vec![abc(tokens, line_no, Opcode::USHR_I8)?],
+        "ushr.i16" => vec![abc(tokens, line_no, Opcode::USHR_I16)?],
+        "ushr.i32" => vec![abc(tokens, line_no, Opcode::USHR_I32)?],
+        "ushr.i64" => vec![abc(tokens, line_no, Opcode::USHR_I64)?],
+
+        "eq.i8" => vec![abc(tokens, line_no, Opcode::EQ_I8)?],
+        "eq.i16" => vec![abc(tokens, line_no, Opcode::EQ_I16)?],
+        "eq.i32" => vec![abc(tokens, line_no, Opcode::EQ_I32)?],
+        "eq.i64" => vec![abc(tokens, line_no, Opcode::EQ_I64)?],
+        "ne.i8" => vec![abc(tokens, line_no, Opcode::NE_I8)?],
+        "ne.i16" => vec![abc(tokens, line_no, Opcode::NE_I16)?],
+        "ne.i32" => vec![abc(tokens, line_no, Opcode::NE_I32)?],
+        "ne.i64" => vec![abc(tokens, line_no, Opcode::NE_I64)?],
+        "lt.i8" => vec![abc(tokens, line_no, Opcode::LT_I8)?],
+        "lt.i16" => vec![abc(tokens, line_no, Opcode::LT_I16)?],
+        "lt.i32" => vec![abc(tokens, line_no, Opcode::LT_I32)?],
+        "lt.i64" => vec![abc(tokens, line_no, Opcode::LT_I64)?],
+        "le.i8" => vec![abc(tokens, line_no, Opcode::LE_I8)?],
+        "le.i16" => vec![abc(tokens, line_no, Opcode::LE_I16)?],
+        "le.i32" => vec![abc(tokens, line_no, Opcode::LE_I32)?],
+        "le.i64" => vec![abc(tokens, line_no, Opcode::LE_I64)?],
+        "gt.i8" => vec![abc(tokens, line_no, Opcode::GT_I8)?],
+        "gt.i16" => vec![abc(tokens, line_no, Opcode::GT_I16)?],
+        "gt.i32" => vec![abc(tokens, line_no, Opcode::GT_I32)?],
+        "gt.i64" => vec![abc(tokens, line_no, Opcode::GT_I64)?],
+        "ge.i8" => vec![abc(tokens, line_no, Opcode::GE_I8)?],
+        "ge.i16" => vec![abc(tokens, line_no, Opcode::GE_I16)?],
+        "ge.i32" => vec![abc(tokens, line_no, Opcode::GE_I32)?],
+        "ge.i64" => vec![abc(tokens, line_no, Opcode::GE_I64)?],
+
+        "lt.u8" => vec![abc(tokens, line_no, Opcode::LT_U8)?],
+        "lt.u16" => vec![abc(tokens, line_no, Opcode::LT_U16)?],
+        "lt.u32" => vec![abc(tokens, line_no, Opcode::LT_U32)?],
+        "lt.u64" => vec![abc(tokens, line_no, Opcode::LT_U64)?],
+        "le.u8" => vec![abc(tokens, line_no, Opcode::LE_U8)?],
+        "le.u16" => vec![abc(tokens, line_no, Opcode::LE_U16)?],
+        "le.u32" => vec![abc(tokens, line_no, Opcode::LE_U32)?],
+        "le.u64" => vec![abc(tokens, line_no, Opcode::LE_U64)?],
+        "gt.u8" => vec![abc(tokens, line_no, Opcode::GT_U8)?],
+        "gt.u16" => vec![abc(tokens, line_no, Opcode::GT_U16)?],
+        "gt.u32" => vec![abc(tokens, line_no, Opcode::GT_U32)?],
+        "gt.u64" => vec![abc(tokens, line_no, Opcode::GT_U64)?],
+        "ge.u8" => vec![abc(tokens, line_no, Opcode::GE_U8)?],
+        "ge.u16" => vec![abc(tokens, line_no, Opcode::GE_U16)?],
+        "ge.u32" => vec![abc(tokens, line_no, Opcode::GE_U32)?],
+        "ge.u64" => vec![abc(tokens, line_no, Opcode::GE_U64)?],
+
+        "eq.f32" => vec![abc(tokens, line_no, Opcode::EQ_F32)?],
+        "eq.f64" => vec![abc(tokens, line_no, Opcode::EQ_F64)?],
+        "ne.f32" => vec![abc(tokens, line_no, Opcode::NE_F32)?],
+        "ne.f64" => vec![abc(tokens, line_no, Opcode::NE_F64)?],
+        "lt.f32" => vec![abc(tokens, line_no, Opcode::LT_F32)?],
+        "lt.f64" => vec![abc(tokens, line_no, Opcode::LT_F64)?],
+        "le.f32" => vec![abc(tokens, line_no, Opcode::LE_F32)?],
+        "le.f64" => vec![abc(tokens, line_no, Opcode::LE_F64)?],
+        "gt.f32" => vec![abc(tokens, line_no, Opcode::GT_F32)?],
+        "gt.f64" => vec![abc(tokens, line_no, Opcode::GT_F64)?],
+        "ge.f32" => vec![abc(tokens, line_no, Opcode::GE_F32)?],
+        "ge.f64" => vec![abc(tokens, line_no, Opcode::GE_F64)?],
+
+        _ => {
+            return Err(TextError::new(
+                line_no,
+                1,
+                format!("unknown instruction `{op}`"),
             ))
         }
-        "move" => abc(tokens, line_no, Opcode::MOVE),
-        "load.i64" => abc(tokens, line_no, Opcode::LOAD_I64),
-        "store.i64" => abc_reg_imm_reg(tokens, line_no, Opcode::STORE_I64),
-        "add.i64" => abc(tokens, line_no, Opcode::ADD_I64),
-        "sub.i64" => abc(tokens, line_no, Opcode::SUB_I64),
-        "mul.i64" => abc(tokens, line_no, Opcode::MUL_I64),
-        "div.i64" => abc(tokens, line_no, Opcode::DIV_I64),
-        "lt.i64" => abc(tokens, line_no, Opcode::LT_I64),
-        "gt.i64" => abc(tokens, line_no, Opcode::GT_I64),
-        _ => Err(TextError::new(
-            line_no,
-            1,
-            format!("unknown instruction `{op}`"),
-        )),
-    }
+    };
+    Ok(result)
 }
 
 fn abc(tokens: &[String], line_no: usize, opcode: Opcode) -> Result<Instruction, TextError> {
@@ -452,7 +900,7 @@ fn abc(tokens: &[String], line_no: usize, opcode: Opcode) -> Result<Instruction,
     ))
 }
 
-fn abc_reg_imm_reg(
+fn abc_rir(
     tokens: &[String],
     line_no: usize,
     opcode: Opcode,
@@ -463,6 +911,20 @@ fn abc_reg_imm_reg(
         parse_reg(&tokens[1], line_no)?,
         parse_u8(&tokens[2], line_no)?,
         parse_reg(&tokens[3], line_no)?,
+    ))
+}
+
+fn abc_rri(
+    tokens: &[String],
+    line_no: usize,
+    opcode: Opcode,
+) -> Result<Instruction, TextError> {
+    expect_len(tokens, 4, line_no)?;
+    Ok(Instruction::abc(
+        opcode,
+        parse_reg(&tokens[1], line_no)?,
+        parse_reg(&tokens[2], line_no)?,
+        parse_u8(&tokens[3], line_no)?,
     ))
 }
 
@@ -479,7 +941,13 @@ fn format_constant(constant: &Constant) -> String {
         Constant::F32(v) => format!("f32 {v}"),
         Constant::F64(v) => format!("f64 {v}"),
         Constant::Bool(v) => format!("bool {v}"),
-        Constant::String(v) => format!("string \"{}\"", escape_string(v)),
+        Constant::Bytes(v) => {
+            let escaped: String = v
+                .iter()
+                .flat_map(|&b| std::ascii::escape_default(b).map(char::from))
+                .collect();
+            format!("bytes \"{}\"", escaped)
+        }
     }
 }
 
@@ -496,7 +964,7 @@ fn parse_typed_constant(kind: &str, value: &str, line_no: usize) -> Result<Const
         "f32" => Constant::F32(parse_num(value, line_no)?),
         "f64" => Constant::F64(parse_num(value, line_no)?),
         "bool" => Constant::Bool(parse_num(value, line_no)?),
-        "string" => Constant::String(parse_quoted(value, line_no)?),
+        "bytes" => Constant::Bytes(parse_quoted(value, line_no)?.into_bytes()),
         _ => {
             return Err(TextError::new(
                 line_no,
@@ -643,6 +1111,10 @@ fn parse_i16(token: &str, line_no: usize) -> Result<i16, TextError> {
     parse_num(token, line_no)
 }
 
+fn parse_i32(token: &str, line_no: usize) -> Result<i32, TextError> {
+    parse_num(token, line_no)
+}
+
 fn parse_usize(token: &str, line_no: usize) -> Result<usize, TextError> {
     parse_num(token, line_no)
 }
@@ -671,6 +1143,28 @@ fn expect_len(tokens: &[String], len: usize, line_no: usize) -> Result<(), TextE
     }
 }
 
+fn emit_ext_abx(
+    opcode: Opcode,
+    a: u8,
+    bx: u32,
+) -> Result<(Instruction, Instruction), TextError> {
+    let lo = bx as u16;
+    let hi = (bx >> 16) as u16;
+    let [bl, bh] = hi.to_le_bytes();
+    let ext = Instruction::abc(Opcode::EXT, 0, bh, bl);
+    let instr = Instruction::abx(opcode, a, lo);
+    Ok((ext, instr))
+}
+
+fn emit_ext_jmp(offset: i32) -> Result<(Instruction, Instruction), TextError> {
+    let lo = offset as i16;
+    let hi = (offset >> 16) as u16;
+    let [bl, bh] = hi.to_le_bytes();
+    let ext = Instruction::abc(Opcode::EXT, 0, bh, bl);
+    let instr = Instruction::jmp(Opcode::JMP, lo);
+    Ok((ext, instr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,28 +1176,121 @@ mod tests {
             .version 1
             .entry 0
 
-            .natives
-              0 "std.print_i64"
+            .import
+              io.print_i64
 
             .constants
               0 i64 42
 
             .callables
-              0 native 0
+              0 io.print_i64
 
             .functions
               0 "main" regs=2
-                0000 closure r0, 0
-                0001 loadk r1, 0
-                0002 call r0, 1, 0
-                0003 halt
+                closure r0, 0
+                loadk r1, 0
+                call r0, 1, 0
+                halt
               end
         "#;
 
         let module = parse_module(source).unwrap();
         assert_eq!(module.name, "hello");
         assert_eq!(module.constants[0], Constant::I64(42));
-        assert_eq!(module.callables[0], Callable::Native(0));
+        assert_eq!(module.callables[0], Callable::Import(0));
         assert_eq!(module.functions[0].chunk.code.len(), 4);
+    }
+
+    #[test]
+    fn labels_resolve_to_correct_offsets() {
+        let source = r#"
+            .module "loop"
+            .version 1
+            .entry 0
+
+            .constants
+              0 i64 0
+              1 i64 10
+              2 i64 1
+
+            .functions
+              0 "main" regs=4
+                loadk r0, 0       ;; r0 = 0 (counter)
+                loadk r1, 1       ;; r1 = 10 (limit)
+                loadk r2, 2       ;; r2 = 1 (step)
+              @loop:
+                lt.i64 r3, r0, r1
+                jmpifnot r3, @end
+                add.i64 r0, r0, r2
+                jmp @loop
+              @end:
+                halt
+              end
+        "#;
+
+        let module = parse_module(source).unwrap();
+        let chunk = &module.functions[0].chunk;
+        assert_eq!(chunk.code.len(), 8);
+
+        // @loop: points at PC 3 (the lt.i64 instruction)
+        // @end: points at PC 7 (the halt instruction)
+        // Instruction 3 (index 3): lt.i64
+        assert_eq!(chunk.code[3].opcode(), Opcode::LT_I64);
+        // Instruction 4 (index 4): jmpifnot r3, @end  → @end is at PC 7, offset = 7 - 4 = 3
+        assert_eq!(chunk.code[4].opcode(), Opcode::JMPIFNOT);
+        assert_eq!(chunk.code[4].sbx(), 3);
+        // Instruction 6 (index 6): jmp @loop → @loop is at PC 3, offset = 3 - 6 = -3
+        assert_eq!(chunk.code[6].opcode(), Opcode::JMP);
+        assert_eq!(chunk.code[6].sbx_ab(), -3);
+    }
+
+    #[test]
+    fn round_trips_all_opcode_families() {
+        let source = r#"
+            .module "all"
+            .version 1
+            .entry 0
+
+            .constants
+              0 i64 10
+              1 f64 1.5
+
+            .functions
+              0 "main" regs=6
+                loadk r0, 0
+                loadk r1, 1
+                move r2, r0
+                add.i64 r2, r2, r1
+                sub.i64 r3, r0, r1
+                mul.i64 r4, r0, r1
+                div.i64 r5, r0, r1
+                mul.f64 r0, r1, r1
+                eq.i64 r2, r0, r1
+                lt.i64 r3, r0, r1
+                and.i64 r4, r0, r1
+                shl.i64 r5, r0, r1
+                conv r0, r0, r1
+                halt
+              end
+        "#;
+
+        let module = parse_module(source).unwrap();
+        let text = module_to_text(&module);
+        let reparsed = parse_module(&text).unwrap();
+
+        assert_eq!(module.name, reparsed.name);
+        assert_eq!(module.constants, reparsed.constants);
+        assert_eq!(
+            module.functions[0].chunk.code.len(),
+            reparsed.functions[0].chunk.code.len()
+        );
+        for (a, b) in module.functions[0]
+            .chunk
+            .code
+            .iter()
+            .zip(reparsed.functions[0].chunk.code.iter())
+        {
+            assert_eq!(a, b, "instruction mismatch");
+        }
     }
 }

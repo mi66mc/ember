@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use ember::bytecode::binary::{decode_module, encode_module};
 use ember::bytecode::text::{module_to_text, parse_module, validate_module};
-use ember::vm::NativeRegistry;
+use ember::bytecode::module::link_modules;
+use ember::vm::native::std_linker;
 use ember::{Module, VMError, Vm};
 
 fn main() {
@@ -21,13 +22,13 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
     match command {
         "run" => {
             let path = arg_path(&args, 1)?;
-            let module = load_module(&path)?;
+            let module = load_module_with_links(&path)?;
             check_imports(&module)?;
             run_module(module)
         }
         "check" => {
             let path = arg_path(&args, 1)?;
-            let module = load_module(&path)?;
+            let module = load_module_with_links(&path)?;
             check_imports(&module)?;
             println!("ok");
             Ok(())
@@ -35,7 +36,7 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
         "build" => {
             let input = arg_path(&args, 1)?;
             let output = parse_output_path(&args)?;
-            let module = load_text_module(&input)?;
+            let module = load_module_with_links(&input)?;
             check_imports(&module)?;
             let bytes =
                 encode_module(&module).map_err(|error| format!("encode error: {error:?}"))?;
@@ -45,13 +46,13 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
         }
         "disasm" => {
             let path = arg_path(&args, 1)?;
-            let module = load_module(&path)?;
+            let module = load_module_with_links(&path)?;
             print!("{}", module_to_text(&module));
             Ok(())
         }
         "dump" => {
             let path = arg_path(&args, 1)?;
-            let module = load_module(&path)?;
+            let module = load_module_with_links(&path)?;
             println!("{module:#?}");
             Ok(())
         }
@@ -91,6 +92,17 @@ fn load_module(path: &Path) -> Result<Module, String> {
     }
 }
 
+fn load_module_with_links(path: &Path) -> Result<Module, String> {
+    let raw = load_module(path)?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let merged = link_modules(raw, &|link_path| {
+        let resolved = dir.join(link_path);
+        load_module(&resolved)
+    })?;
+    validate_module(&merged).map_err(|error| format!("validation error: {error}"))?;
+    Ok(merged)
+}
+
 fn load_text_module(path: &Path) -> Result<Module, String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -99,17 +111,20 @@ fn load_text_module(path: &Path) -> Result<Module, String> {
 
 fn check_imports(module: &Module) -> Result<(), String> {
     validate_module(module).map_err(|error| format!("validation error: {error}"))?;
-    let registry = NativeRegistry::with_std();
-    for native in &module.natives {
-        if !registry.contains(&native.name) {
-            return Err(format!("unknown native `{}`", native.name));
+    let linker = std_linker();
+    for callable in &module.callables {
+        if let ember::Callable::Import(import_idx) = callable {
+            let import = &module.imports[*import_idx as usize];
+            if !linker.contains_native(import) {
+                return Err(format!("unresolved native import `{import}`"));
+            }
         }
     }
     Ok(())
 }
 
 fn run_module(module: Module) -> Result<(), String> {
-    let mut vm = Vm::new(1024 * 1024);
+    let mut vm = Vm::with_linker(1024 * 1024, std_linker());
     vm.run_module(module).map_err(format_vm_error)
 }
 

@@ -1,6 +1,7 @@
 use crate::bytecode::{
-    Callable, Chunk, Constant, Function, Instruction, Module, NativeImport, Opcode,
+    Callable, Chunk, Constant, Function, Instruction, Module, Opcode,
 };
+use crate::vm::native::ImportDecl;
 
 const MAGIC: &[u8; 4] = b"EMB\0";
 const VERSION: u16 = 1;
@@ -14,6 +15,7 @@ pub enum BinaryError {
     InvalidOpcode(u8),
     InvalidConstantTag(u8),
     InvalidCallableTag(u8),
+    InvalidImportTag(u8),
     CountTooLarge,
 }
 
@@ -24,9 +26,11 @@ pub fn encode_module(module: &Module) -> Result<Vec<u8>, BinaryError> {
     write_string(&mut out, &module.name)?;
     write_u32(&mut out, module.entry)?;
 
-    write_u32(&mut out, module.natives.len() as u32)?;
-    for native in &module.natives {
-        write_string(&mut out, &native.name)?;
+    write_u32(&mut out, module.imports.len() as u32)?;
+    for import in &module.imports {
+        out.push(import.is_native() as u8);
+        write_string(&mut out, import.module_name())?;
+        write_string(&mut out, import.function_name())?;
     }
 
     write_u32(&mut out, module.constants.len() as u32)?;
@@ -41,7 +45,7 @@ pub fn encode_module(module: &Module) -> Result<Vec<u8>, BinaryError> {
                 out.push(0);
                 write_u32(&mut out, *id)?;
             }
-            Callable::Native(id) => {
+            Callable::Import(id) => {
                 out.push(1);
                 write_u32(&mut out, *id)?;
             }
@@ -70,11 +74,24 @@ pub fn decode_module(bytes: &[u8]) -> Result<Module, BinaryError> {
     module.version = version;
     module.entry = reader.read_u32()?;
 
-    let native_count = reader.read_u32()? as usize;
-    for _ in 0..native_count {
-        module.natives.push(NativeImport {
-            name: reader.read_string()?,
-        });
+    let import_count = reader.read_u32()? as usize;
+    for _ in 0..import_count {
+        let tag = reader.read_u8()?;
+        match tag {
+            0 => {
+                module.imports.push(ImportDecl::native(
+                    reader.read_string()?,
+                    reader.read_string()?,
+                ));
+            }
+            1 => {
+                module.imports.push(ImportDecl::external(
+                    reader.read_string()?,
+                    reader.read_string()?,
+                ));
+            }
+            tag => return Err(BinaryError::InvalidImportTag(tag)),
+        }
     }
 
     let constant_count = reader.read_u32()? as usize;
@@ -85,10 +102,9 @@ pub fn decode_module(bytes: &[u8]) -> Result<Module, BinaryError> {
     let callable_count = reader.read_u32()? as usize;
     for _ in 0..callable_count {
         let tag = reader.read_u8()?;
-        let id = reader.read_u32()?;
         module.callables.push(match tag {
-            0 => Callable::Function(id),
-            1 => Callable::Native(id),
+            0 => Callable::Function(reader.read_u32()?),
+            1 => Callable::Import(reader.read_u32()?),
             tag => return Err(BinaryError::InvalidCallableTag(tag)),
         });
     }
@@ -176,9 +192,9 @@ fn encode_constant(out: &mut Vec<u8>, constant: &Constant) -> Result<(), BinaryE
             out.push(10);
             out.push(*v as u8);
         }
-        Constant::String(v) => {
+        Constant::Bytes(v) => {
             out.push(11);
-            write_string(out, v)?;
+            write_bytes(out, v)?;
         }
     }
     Ok(())
@@ -197,7 +213,7 @@ fn decode_constant(reader: &mut Reader<'_>) -> Result<Constant, BinaryError> {
         8 => Constant::F32(f32::from_le_bytes(reader.read_array()?)),
         9 => Constant::F64(f64::from_le_bytes(reader.read_array()?)),
         10 => Constant::Bool(reader.read_u8()? != 0),
-        11 => Constant::String(reader.read_string()?),
+        11 => Constant::Bytes(reader.read_bytes()?),
         tag => return Err(BinaryError::InvalidConstantTag(tag)),
     })
 }
@@ -215,6 +231,13 @@ fn write_string(out: &mut Vec<u8>, value: &str) -> Result<(), BinaryError> {
     let len = u32::try_from(value.len()).map_err(|_| BinaryError::CountTooLarge)?;
     write_u32(out, len)?;
     out.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn write_bytes(out: &mut Vec<u8>, value: &[u8]) -> Result<(), BinaryError> {
+    let len = u32::try_from(value.len()).map_err(|_| BinaryError::CountTooLarge)?;
+    write_u32(out, len)?;
+    out.extend_from_slice(value);
     Ok(())
 }
 
@@ -260,6 +283,11 @@ impl<'a> Reader<'a> {
         let bytes = self.read_exact(len)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| BinaryError::InvalidUtf8)
     }
+
+    fn read_bytes(&mut self) -> Result<Vec<u8>, BinaryError> {
+        let len = self.read_u32()? as usize;
+        Ok(self.read_exact(len)?.to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -274,18 +302,18 @@ mod tests {
             .module "hello"
             .version 1
             .entry 0
-            .natives
-              0 "std.print_str"
+            .import
+              io.print_i64
             .constants
-              0 string "hello"
+              0 i64 42
             .callables
-              0 native 0
+              0 io.print_i64
             .functions
               0 "main" regs=2
-                0000 closure r0, 0
-                0001 loadk r1, 0
-                0002 call r0, 1, 0
-                0003 halt
+                closure r0, 0
+                loadk r1, 0
+                call r0, 1, 0
+                halt
               end
             "#,
         )

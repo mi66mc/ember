@@ -4,7 +4,7 @@ use crate::bytecode::{
     Callable, Chunk, Constant, Function, Instruction, Module, Opcode, ValueType,
 };
 use crate::vm::memory::Memory;
-use crate::vm::native::{NativeError, NativeRegistry};
+use crate::vm::native::{NativeError, NativeLinker};
 use crate::vm::register::{Register, VmValue};
 use crate::vm::stack::CallStack;
 
@@ -188,24 +188,33 @@ pub enum VMError {
     InvalidConstantIndex(u16),
     InvalidCallableIndex(u16),
     InvalidFunctionIndex(u32),
-    InvalidNativeIndex(u32),
     InvalidConversionType(u8),
     InvalidProgramCounter { pc: usize, len: usize },
     InvalidRegister(u8),
     ExpectedScalar(u8),
     ExpectedFunction(u8),
-    UnknownNativeFunction(String),
+    UnresolvedNativeImport(String),
     NativeError(String),
     InvalidJump { from: usize, offset: i16 },
     MemoryOutOfBounds { addr: usize, size: usize },
+    Runtime {
+        message: String,
+        backtrace: Vec<FrameInfo>,
+    },
     Halted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub function_name: String,
+    pub pc: usize,
 }
 
 pub struct Vm {
     pub stack: CallStack,
     pub memory: Memory,
     pub globals: Vec<VmValue>,
-    pub natives: NativeRegistry,
+    pub linker: NativeLinker,
     module: Option<Rc<Module>>,
 }
 
@@ -217,17 +226,17 @@ impl Vm {
             stack: CallStack::new(),
             memory: Memory::new(memory_size),
             globals: Vec::new(),
-            natives: NativeRegistry::with_std(),
+            linker: NativeLinker::default(),
             module: None,
         }
     }
 
-    pub fn with_natives(memory_size: usize, natives: NativeRegistry) -> Self {
+    pub fn with_linker(memory_size: usize, linker: NativeLinker) -> Self {
         Vm {
             stack: CallStack::new(),
             memory: Memory::new(memory_size),
             globals: Vec::new(),
-            natives,
+            linker,
             module: None,
         }
     }
@@ -247,8 +256,12 @@ impl Vm {
             .ok_or(VMError::InvalidFunctionIndex(module.entry))?
             .chunk
             .clone();
+        let entry_name = module
+            .entry_function()
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "main".to_string());
         self.module = Some(Rc::new(module));
-        self.stack.push_entry(Rc::new(entry));
+        self.stack.push_entry(Rc::new(entry), entry_name);
 
         loop {
             match self.step() {
@@ -258,7 +271,19 @@ impl Vm {
                     self.module = None;
                     return Ok(());
                 }
-                Err(error) => {
+                Err(mut error) => {
+                    if !matches!(&error, VMError::Runtime { .. }) {
+                        let backtrace: Vec<FrameInfo> = self.stack.frames().iter().rev().map(|f| {
+                            FrameInfo {
+                                function_name: f.function_name.clone(),
+                                pc: f.pc,
+                            }
+                        }).collect();
+                        error = VMError::Runtime {
+                            message: format!("{error:?}"),
+                            backtrace,
+                        };
+                    }
                     self.module = None;
                     return Err(error);
                 }
@@ -270,26 +295,52 @@ impl Vm {
         let instr = self.fetch()?;
         self.stack.advance_pc();
 
+        let mut extended_bits: u32 = 0;
+        let instr = if instr.opcode() == Opcode::EXT {
+            let extra = ((instr.c() as u16) << 8) | instr.b() as u16;
+            let next = self.fetch()?;
+            self.stack.advance_pc();
+            extended_bits = (extra as u32) << 16;
+            next
+        } else {
+            instr
+        };
+
+        let effective_bx = instr.bx() as u32 | extended_bits;
+        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32
+            | (extended_bits as i32);
+
         match instr.opcode() {
             Opcode::HALT => return Err(VMError::Halted),
             Opcode::NOP => {}
 
             Opcode::LOADK => {
-                let constant = {
-                    self.module()?
-                        .constants
-                        .get(instr.bx() as usize)
-                        .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
-                        .clone()
+                let bx = if extended_bits != 0 {
+                    effective_bx as usize
+                } else {
+                    instr.bx() as usize
                 };
+                let constant = self.module()?
+                    .constants
+                    .get(bx)
+                    .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
+                    .clone();
                 match constant {
-                    Constant::String(value) => self.set_value(instr.a(), VmValue::string(value))?,
+                    Constant::Bytes(bytes) => {
+                        let len = bytes.len();
+                        let ptr = self.memory.alloc(len);
+                        unsafe {
+                            let dst = self.memory.as_mut_ptr().add(ptr);
+                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+                        }
+                        self.set_scalar(instr.a(), Register::from_ptr(ptr))?;
+                    }
                     constant => self.set_scalar(
                         instr.a(),
                         Register {
                             bits: constant
                                 .to_bits()
-                                .expect("non-string constants always have scalar bits"),
+                                .expect("non-bytes constants always have scalar bits"),
                         },
                     )?,
                 }
@@ -462,24 +513,46 @@ impl Vm {
             Opcode::USHR_I32 => shiftop!(self, instr, u32, from_u32, wrapping_shr),
             Opcode::USHR_I64 => shiftop!(self, instr, u64, from_u64, wrapping_shr),
 
-            Opcode::JMP => self.jump(instr.sbx_ab() - 1)?,
+            Opcode::JMP => {
+                let offset = if extended_bits != 0 {
+                    effective_offset as i16
+                } else {
+                    instr.sbx_ab()
+                };
+                self.jump(offset - 1)?;
+            }
             Opcode::JMPIF => {
+                let offset = if extended_bits != 0 {
+                    effective_offset as i16
+                } else {
+                    instr.sbx()
+                };
                 if unsafe { self.scalar(instr.a())?.u64 } != 0 {
-                    self.jump(instr.sbx() - 1)?;
+                    self.jump(offset - 1)?;
                 }
             }
             Opcode::JMPIFNOT => {
+                let offset = if extended_bits != 0 {
+                    effective_offset as i16
+                } else {
+                    instr.sbx()
+                };
                 if unsafe { self.scalar(instr.a())?.u64 } == 0 {
-                    self.jump(instr.sbx() - 1)?;
+                    self.jump(offset - 1)?;
                 }
             }
 
             Opcode::CLOSURE => {
+                let bx = if extended_bits != 0 {
+                    effective_bx as usize
+                } else {
+                    instr.bx() as usize
+                };
                 let closure = {
                     let module = self.module()?;
                     match module
                         .callables
-                        .get(instr.bx() as usize)
+                        .get(bx)
                         .ok_or(VMError::InvalidCallableIndex(instr.bx()))?
                     {
                         Callable::Function(function_id) => {
@@ -489,16 +562,18 @@ impl Vm {
                                 .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
                             VmValue::function(Rc::new(function.chunk.clone()))
                         }
-                        Callable::Native(native_id) => {
-                            let native_name = &module
-                                .natives
-                                .get(*native_id as usize)
-                                .ok_or(VMError::InvalidNativeIndex(*native_id))?
-                                .name;
-                            let native = self.natives.get(native_name).ok_or_else(|| {
-                                VMError::UnknownNativeFunction(native_name.clone())
-                            })?;
-                            VmValue::native_function(native)
+                        Callable::Import(import_idx) => {
+                            let import_decl = module
+                                .imports
+                                .get(*import_idx as usize)
+                                .ok_or(VMError::InvalidCallableIndex(instr.bx()))?;
+                            let resolved = self
+                                .linker
+                                .resolve(import_decl)
+                                .ok_or_else(|| {
+                                    VMError::UnresolvedNativeImport(import_decl.to_string())
+                                })?;
+                            VmValue::native_import(resolved)
                         }
                     }
                 };
@@ -533,6 +608,11 @@ impl Vm {
                     ValueType::from_byte(to_type).ok_or(VMError::InvalidConversionType(to_type))?;
                 let result = convert_register(self.scalar(instr.b())?, from, to);
                 self.set_scalar(instr.a(), result)?;
+            }
+            Opcode::EXT => {
+                return Err(VMError::NativeError(
+                    "unexpected EXT in execute (should have been handled by fetch)".to_string(),
+                ));
             }
         }
 
@@ -616,16 +696,17 @@ impl Vm {
                 return Err(VMError::InvalidRegister(arg_count));
             }
 
-            self.stack.push_call(function, base, expected_returns);
+            self.stack.push_call(function.clone(), base, expected_returns, "anon");
             for (index, value) in args.into_iter().enumerate() {
                 self.set_value(index as u8, value)?;
             }
             return Ok(());
         }
 
-        if let Some(function) = callable.as_native_function() {
-            let returns = function
-                .call(&args)
+        if let Some(function) = callable.as_native_import() {
+            let returns = self
+                .linker
+                .call(function, &args, &mut self.memory)
                 .map_err(|NativeError { message }| VMError::NativeError(message))?;
             let copy_count = usize::min(expected_returns as usize, returns.len());
             for (index, value) in returns.into_iter().take(copy_count).enumerate() {
@@ -720,7 +801,7 @@ mod tests {
         let mut vm = Vm::new(1024);
         vm.module = Some(Rc::new(module));
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
-        vm.stack.push_entry(Rc::new(entry));
+        vm.stack.push_entry(Rc::new(entry), "test");
         vm.step().unwrap();
         vm.step().unwrap();
         vm.step().unwrap();
@@ -763,7 +844,7 @@ mod tests {
         let mut vm = Vm::new(1024);
         vm.module = Some(Rc::new(module));
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
-        vm.stack.push_entry(Rc::new(entry));
+        vm.stack.push_entry(Rc::new(entry), "test");
         loop {
             match vm.step() {
                 Ok(()) => {}
@@ -805,7 +886,7 @@ mod tests {
         let mut vm = Vm::new(1024);
         vm.module = Some(Rc::new(module));
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
-        vm.stack.push_entry(Rc::new(entry));
+        vm.stack.push_entry(Rc::new(entry), "test");
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
         unsafe {
@@ -851,7 +932,7 @@ mod tests {
         let mut vm = Vm::new(1024);
         vm.module = Some(Rc::new(module));
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
-        vm.stack.push_entry(Rc::new(entry));
+        vm.stack.push_entry(Rc::new(entry), "test");
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
         unsafe {
@@ -866,7 +947,7 @@ mod tests {
         chunk.emit(Instruction::abc(Opcode::CALL, 0, 0, 0));
 
         let mut vm = Vm::new(1024);
-        vm.stack.push_entry(Rc::new(chunk));
+        vm.stack.push_entry(Rc::new(chunk), "test");
         assert_eq!(vm.step(), Err(VMError::ExpectedFunction(0)));
     }
 
@@ -875,7 +956,7 @@ mod tests {
         let mut empty = Chunk::new();
         empty.max_registers = 1;
         let mut vm = Vm::new(8);
-        vm.stack.push_entry(Rc::new(empty));
+        vm.stack.push_entry(Rc::new(empty), "test");
         assert_eq!(
             vm.step(),
             Err(VMError::InvalidProgramCounter { pc: 0, len: 0 })
@@ -889,7 +970,7 @@ mod tests {
         module.constants.push(Constant::I64(1));
         vm.module = Some(Rc::new(module));
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
-        vm.stack.push_entry(Rc::new(entry));
+        vm.stack.push_entry(Rc::new(entry), "test");
         assert_eq!(vm.step(), Err(VMError::InvalidRegister(2)));
 
         let mut bad_mem = Chunk::new();
@@ -902,7 +983,7 @@ mod tests {
         module.constants = vec![Constant::I64(4), Constant::I64(9)];
         vm.module = Some(Rc::new(module));
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
-        vm.stack.push_entry(Rc::new(entry));
+        vm.stack.push_entry(Rc::new(entry), "test");
         vm.step().unwrap();
         vm.step().unwrap();
         assert_eq!(

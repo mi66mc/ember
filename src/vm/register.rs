@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
-use crate::vm::native::NativeFunction;
+use crate::vm::native::ImportIndex;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -34,7 +34,6 @@ impl Register {
         Register { bits: 0 }
     }
 
-    // signed integers
     pub fn from_i8(v: i8) -> Self {
         Register { i8: v }
     }
@@ -48,7 +47,6 @@ impl Register {
         Register { i64: v }
     }
 
-    // unsigned integers
     pub fn from_u8(v: u8) -> Self {
         Register { u8: v }
     }
@@ -62,7 +60,6 @@ impl Register {
         Register { u64: v }
     }
 
-    // floats
     pub fn from_f32(v: f32) -> Self {
         Register { f32: v }
     }
@@ -70,7 +67,6 @@ impl Register {
         Register { f64: v }
     }
 
-    // other
     pub fn from_ptr(v: usize) -> Self {
         Register { ptr: v }
     }
@@ -95,8 +91,7 @@ impl std::fmt::Debug for Register {
 pub enum VmValue {
     Scalar(Register),
     Function(Rc<Chunk>),
-    NativeFunction(NativeFunction),
-    String(Rc<str>),
+    NativeImport(ImportIndex),
 }
 
 impl VmValue {
@@ -108,12 +103,8 @@ impl VmValue {
         VmValue::Function(chunk)
     }
 
-    pub fn native_function(function: NativeFunction) -> Self {
-        VmValue::NativeFunction(function)
-    }
-
-    pub fn string(value: impl Into<Rc<str>>) -> Self {
-        VmValue::String(value.into())
+    pub fn native_import(index: ImportIndex) -> Self {
+        VmValue::NativeImport(index)
     }
 
     pub fn zero() -> Self {
@@ -123,21 +114,21 @@ impl VmValue {
     pub fn as_scalar(&self) -> Option<Register> {
         match self {
             VmValue::Scalar(register) => Some(*register),
-            VmValue::Function(_) | VmValue::NativeFunction(_) | VmValue::String(_) => None,
+            VmValue::Function(_) | VmValue::NativeImport(_) => None,
         }
     }
 
     pub fn as_function(&self) -> Option<Rc<Chunk>> {
         match self {
-            VmValue::Scalar(_) | VmValue::NativeFunction(_) | VmValue::String(_) => None,
+            VmValue::Scalar(_) | VmValue::NativeImport(_) => None,
             VmValue::Function(chunk) => Some(chunk.clone()),
         }
     }
 
-    pub fn as_native_function(&self) -> Option<NativeFunction> {
+    pub fn as_native_import(&self) -> Option<ImportIndex> {
         match self {
-            VmValue::NativeFunction(function) => Some(function.clone()),
-            VmValue::Scalar(_) | VmValue::Function(_) | VmValue::String(_) => None,
+            VmValue::NativeImport(index) => Some(*index),
+            VmValue::Scalar(_) | VmValue::Function(_) => None,
         }
     }
 }
@@ -195,7 +186,6 @@ mod tests {
 
     #[test]
     fn test_register_overlap() {
-        // i8 lives in the lower byte of i64
         let r = Register::from_i64(0x0102030405060708);
         unsafe {
             assert_eq!(r.i8, 0x08);
