@@ -24,7 +24,7 @@ pub fn encode_module(module: &Module) -> Result<Vec<u8>, BinaryError> {
     out.extend_from_slice(MAGIC);
     write_u16(&mut out, VERSION);
     write_string(&mut out, &module.name)?;
-    write_u32(&mut out, module.entry)?;
+    write_u32(&mut out, module.entry.unwrap_or(u32::MAX))?;
 
     write_u32(&mut out, module.imports.len() as u32)?;
     for import in &module.imports {
@@ -72,7 +72,8 @@ pub fn decode_module(bytes: &[u8]) -> Result<Module, BinaryError> {
 
     let mut module = Module::new(reader.read_string()?);
     module.version = version;
-    module.entry = reader.read_u32()?;
+    let raw_entry = reader.read_u32()?;
+    module.entry = if raw_entry == u32::MAX { None } else { Some(raw_entry) };
 
     let import_count = reader.read_u32()? as usize;
     for _ in 0..import_count {

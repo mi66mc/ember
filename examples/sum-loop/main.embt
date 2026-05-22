@@ -26,15 +26,15 @@
   end
 
   1 "sum_to" regs=5
-    loadk r1, 0
-    loadk r2, 2
-    @loop:
+    loadk r1, 0      ;; 0
+    loadk r2, 2      ;; 1
+    @loop:           ;; 2
     gt.i64 r3, r1, r0
     jmpif r3, @end
     add.i64 r2, r2, r1
     loadk r4, 0
     add.i64 r1, r1, r4
     jmp @loop
-    @end:
+    @end:            ;; 8
     ret r2, 1
   end

@@ -23,12 +23,14 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
         "run" => {
             let path = arg_path(&args, 1)?;
             let module = load_module_with_links(&path)?;
+            require_entry(&module)?;
             check_imports(&module)?;
             run_module(module)
         }
         "check" => {
             let path = arg_path(&args, 1)?;
             let module = load_module_with_links(&path)?;
+            require_entry(&module)?;
             check_imports(&module)?;
             println!("ok");
             Ok(())
@@ -37,6 +39,7 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
             let input = arg_path(&args, 1)?;
             let output = parse_output_path(&args)?;
             let module = load_module_with_links(&input)?;
+            require_entry(&module)?;
             check_imports(&module)?;
             let bytes =
                 encode_module(&module).map_err(|error| format!("encode error: {error:?}"))?;
@@ -113,12 +116,19 @@ fn check_imports(module: &Module) -> Result<(), String> {
     validate_module(module).map_err(|error| format!("validation error: {error}"))?;
     let linker = std_linker();
     for callable in &module.callables {
-        if let ember::Callable::Import(import_idx) = callable {
-            let import = &module.imports[*import_idx as usize];
-            if !linker.contains_native(import) {
+        if let ember::Callable::Import(id) = callable {
+            let import = &module.imports[*id as usize];
+            if import.is_native() && !linker.contains_native(import) {
                 return Err(format!("unresolved native import `{import}`"));
             }
         }
+    }
+    Ok(())
+}
+
+fn require_entry(module: &Module) -> Result<(), String> {
+    if module.entry.is_none() {
+        return Err("module has no entry point".to_string());
     }
     Ok(())
 }

@@ -76,10 +76,10 @@ pub fn parse_module(source: &str) -> Result<Module, TextError> {
                     .map_err(|_| TextError::new(line_no, 1, "invalid module version"))?;
             }
             _ if line.starts_with(".entry ") => {
-                module.entry = line[".entry ".len()..]
+                module.entry = Some(line[".entry ".len()..]
                     .trim()
                     .parse()
-                    .map_err(|_| TextError::new(line_no, 1, "invalid entry function id"))?;
+                    .map_err(|_| TextError::new(line_no, 1, "invalid entry function id"))?);
             }
             _ => match section {
                 Section::Imports => parse_import(&line, line_no, &mut module)?,
@@ -255,8 +255,10 @@ fn is_instruction(tokens: &[String]) -> bool {
 }
 
 pub fn validate_module(module: &Module) -> Result<(), String> {
-    if module.entry as usize >= module.functions.len() {
-        return Err(format!("entry function {} does not exist", module.entry));
+    if let Some(entry) = module.entry {
+        if entry as usize >= module.functions.len() {
+            return Err(format!("entry function {entry} does not exist"));
+        }
     }
     for (idx, callable) in module.callables.iter().enumerate() {
         match callable {
@@ -289,7 +291,9 @@ pub fn module_to_text(module: &Module) -> String {
     let mut out = String::new();
     out.push_str(&format!(".module \"{}\"\n", escape_string(&module.name)));
     out.push_str(&format!(".version {}\n", module.version));
-    out.push_str(&format!(".entry {}\n", module.entry));
+    if let Some(entry) = module.entry {
+        out.push_str(&format!(".entry {entry}\n"));
+    }
 
     out.push_str("\n.import\n");
     for import in &module.imports {

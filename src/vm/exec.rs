@@ -243,6 +243,7 @@ impl Vm {
 
     pub fn run(&mut self, chunk: Chunk) -> Result<(), VMError> {
         let mut module = Module::new("<chunk>");
+        module.entry = Some(0);
         module.functions.push(Function {
             name: "main".to_string(),
             chunk,
@@ -251,13 +252,18 @@ impl Vm {
     }
 
     pub fn run_module(&mut self, module: Module) -> Result<(), VMError> {
+        let entry_idx = module
+            .entry
+            .ok_or(VMError::NativeError("module has no entry point".to_string()))?;
         let entry = module
-            .entry_function()
-            .ok_or(VMError::InvalidFunctionIndex(module.entry))?
+            .functions
+            .get(entry_idx as usize)
+            .ok_or(VMError::InvalidFunctionIndex(entry_idx))?
             .chunk
             .clone();
         let entry_name = module
-            .entry_function()
+            .functions
+            .get(entry_idx as usize)
             .map(|f| f.name.clone())
             .unwrap_or_else(|| "main".to_string());
         self.module = Some(Rc::new(module));
@@ -772,6 +778,7 @@ mod tests {
 
     fn module_for(chunk: Chunk) -> Module {
         let mut module = Module::new("test");
+        module.entry = Some(0);
         module.functions.push(Function {
             name: "main".to_string(),
             chunk,
@@ -829,7 +836,7 @@ mod tests {
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
         let mut module = Module::new("test");
-        module.entry = 0;
+        module.entry = Some(0);
         module.constants = vec![Constant::I64(10), Constant::I64(20)];
         module.callables = vec![Callable::Function(1)];
         module.functions.push(Function {
@@ -873,6 +880,7 @@ mod tests {
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
         let mut module = Module::new("test");
+        module.entry = Some(0);
         module.constants = vec![Constant::I64(1), Constant::I64(2)];
         module.callables = vec![Callable::Function(1)];
         module.functions.push(Function {
@@ -915,6 +923,7 @@ mod tests {
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
         let mut module = Module::new("test");
+        module.entry = Some(0);
         module.constants = vec![Constant::I64(7)];
         module.callables = vec![Callable::Function(1), Callable::Function(2)];
         module.functions.push(Function {

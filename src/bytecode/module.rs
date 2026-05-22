@@ -17,7 +17,7 @@ pub struct Function {
 pub struct Module {
     pub name: String,
     pub version: u16,
-    pub entry: u32,
+    pub entry: Option<u32>,
     pub constants: Vec<Constant>,
     pub imports: Vec<ImportDecl>,
     pub callables: Vec<Callable>,
@@ -29,7 +29,7 @@ impl Module {
         Self {
             name: name.into(),
             version: 1,
-            entry: 0,
+            entry: None,
             constants: Vec::new(),
             imports: Vec::new(),
             callables: Vec::new(),
@@ -38,7 +38,7 @@ impl Module {
     }
 
     pub fn entry_function(&self) -> Option<&Function> {
-        self.functions.get(self.entry as usize)
+        self.entry.and_then(|e| self.functions.get(e as usize))
     }
 }
 
@@ -165,6 +165,6 @@ pub fn link_modules(
         });
     }
 
-    merged.entry = root.entry + our_func_base;
+    merged.entry = root.entry.map(|e| e + our_func_base);
     Ok(merged)
 }
