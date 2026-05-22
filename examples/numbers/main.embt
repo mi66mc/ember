@@ -1,0 +1,29 @@
+.module "numbers"
+.entry 0
+
+.import
+  io.print_i64
+
+;; Computes 7 * 6 + 3 = 45 and prints the result
+
+.constants
+  0 i64 7                     ;; multiplicand
+  1 i64 6                     ;; multiplier
+  2 i64 3                     ;; addend
+
+.callables
+  0 io.print_i64
+
+.functions
+  0 "main" regs=5
+    loadk r0, 0               ;; r0 = 7
+    loadk r1, 1               ;; r1 = 6
+    loadk r2, 2               ;; r2 = 3
+    mul.i64 r3, r0, r1        ;; r3 = 7 * 6 = 42
+    add.i64 r3, r3, r2        ;; r3 = 42 + 3 = 45
+
+    closure r0, 0             ;; r0 = io.print_i64
+    move r1, r3               ;; r1 = 45
+    call r0, 1, 0             ;; print_i64(45)
+    halt
+  end

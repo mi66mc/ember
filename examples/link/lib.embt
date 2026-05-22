@@ -1,18 +1,23 @@
 .module "lib"
 
-.import
-  io.print_i64
+;; Library module — no .entry, intended to be linked.
+;; Exports two pure arithmetic functions.
 
 .constants
-  0 i64 2
+  0 i64 2                     ;; multiplier for "double"
 
 .callables
-  0 function 0
-  1 io.print_i64
+  0 function 0                ;; double (uses itself for demo, not really needed)
+  1 function 1                ;; square
 
 .functions
   0 "double" regs=3
-    loadk r2, 0
-    mul.i64 r1, r0, r2
-    ret r1, 1
+    loadk r2, 0               ;; r2 = 2
+    mul.i64 r1, r0, r2        ;; r1 = arg * 2
+    ret r1, 1                 ;; return r1
+  end
+
+  1 "square" regs=3
+    mul.i64 r1, r0, r0        ;; r1 = arg * arg
+    ret r1, 1                 ;; return r1
   end

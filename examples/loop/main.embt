@@ -1,0 +1,37 @@
+.module "loop"
+.entry 0
+
+.import
+  io.print_i64
+
+;; Sums 1 through 10 using a counted loop with labels.
+;; Result: 1 + 2 + ... + 10 = 55
+
+.constants
+  0 i64 0                     ;; accumulator start value
+  1 i64 1                     ;; counter start / step
+  2 i64 10                    ;; limit
+
+.callables
+  0 io.print_i64
+
+.functions
+  0 "main" regs=5
+    loadk r0, 0               ;; r0 = 0 (accumulator)
+    loadk r1, 1               ;; r1 = 1 (counter)
+    loadk r2, 2               ;; r2 = 10 (limit)
+    loadk r4, 1               ;; r4 = 1 (step increment)
+
+  @loop:
+    gt.i64 r3, r1, r2         ;; r3 = (counter > limit)?
+    jmpif r3, @end            ;; exit loop when counter > 10
+    add.i64 r0, r0, r1        ;; acc += counter
+    add.i64 r1, r1, r4        ;; counter += 1
+    jmp @loop                 ;; repeat
+
+  @end:
+    closure r1, 0             ;; r1 = io.print_i64
+    move r2, r0               ;; r2 = 55
+    call r1, 1, 0             ;; print_i64(55)
+    halt
+  end

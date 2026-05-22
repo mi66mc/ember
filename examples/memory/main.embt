@@ -1,0 +1,66 @@
+.module "memory"
+.entry 0
+
+.import
+  core.alloc
+  io.print_i64
+
+;; Allocates memory, stores five i64 values [10,20,30,40,50],
+;; loads them back, sums them, and prints the result (150).
+
+.constants
+  0 i64 40                    ;; alloc size: 5 * 8 bytes
+  1 i64 10                    ;; value 1
+  2 i64 20                    ;; value 2
+  3 i64 30                    ;; value 3
+  4 i64 40                    ;; value 4
+  5 i64 50                    ;; value 5
+
+.callables
+  0 core.alloc
+  1 io.print_i64
+
+.functions
+  0 "main" regs=10
+    ;; allocate 40 bytes
+    closure r0, 0             ;; r0 = core.alloc
+    loadk r1, 0               ;; r1 = 40
+    call r0, 1, 1             ;; r0 = ptr (returned from alloc)
+    move r6, r0               ;; r6 = saved pointer
+
+    ;; store values at ptr[0], ptr[8], ptr[16], ptr[24], ptr[32]
+    loadk r7, 1               ;; r7 = 10
+    store.i64 r6, 0, r7       ;; ptr[0]  = 10
+
+    loadk r7, 2               ;; r7 = 20
+    store.i64 r6, 8, r7       ;; ptr[8]  = 20
+
+    loadk r7, 3               ;; r7 = 30
+    store.i64 r6, 16, r7      ;; ptr[16] = 30
+
+    loadk r7, 4               ;; r7 = 40
+    store.i64 r6, 24, r7      ;; ptr[24] = 40
+
+    loadk r7, 5               ;; r7 = 50
+    store.i64 r6, 32, r7      ;; ptr[32] = 50
+
+    ;; load values back and accumulate sum
+    load.i64 r7, r6, 0        ;; r7 = 10
+    load.i64 r8, r6, 8        ;; r8 = 20
+    add.i64 r9, r7, r8        ;; r9 = 30
+
+    load.i64 r7, r6, 16       ;; r7 = 30
+    add.i64 r9, r9, r7        ;; r9 = 60
+
+    load.i64 r7, r6, 24       ;; r7 = 40
+    add.i64 r9, r9, r7        ;; r9 = 100
+
+    load.i64 r7, r6, 32       ;; r7 = 50
+    add.i64 r9, r9, r7        ;; r9 = 150
+
+    ;; print sum
+    closure r1, 1             ;; r1 = io.print_i64
+    move r2, r9               ;; r2 = 150
+    call r1, 1, 0             ;; print_i64(150)
+    halt
+  end

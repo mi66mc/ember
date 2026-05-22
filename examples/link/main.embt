@@ -4,21 +4,44 @@
 .import
   io.print_i64
   "lib.embt".double
+  "lib.embt".square
+
+;; Links against lib.embt and calls both exported functions:
+;;   double(21) = 42
+;;   square(7)  = 49
 
 .constants
-  0 i64 21
+  0 i64 21                    ;; argument for double
+  1 i64 7                     ;; argument for square
 
 .callables
   0 "lib.embt".double
-  1 io.print_i64
+  1 "lib.embt".square
+  2 io.print_i64
 
 .functions
-  0 "main" regs=4
-    loadk r1, 0
-    closure r0, 0
-    call r0, 1, 1
-    closure r2, 1
-    move r3, r0
-    call r2, 1, 0
+  0 "main" regs=5
+    ;; --- double(21) ---
+    loadk r1, 0               ;; r1 = 21 (arg)
+    closure r0, 0             ;; r0 = double function ref
+    call r0, 1, 1             ;; r0 = double(21) = 42
+    move r3, r0               ;; r3 = 42 (save result)
+
+    ;; --- print 42 ---
+    closure r1, 2             ;; r1 = io.print_i64
+    move r2, r3               ;; r2 = 42
+    call r1, 1, 0             ;; print_i64(42)
+
+    ;; --- square(7) ---
+    loadk r1, 1               ;; r1 = 7 (arg)
+    closure r0, 1             ;; r0 = square function ref
+    call r0, 1, 1             ;; r0 = square(7) = 49
+    move r4, r0               ;; r4 = 49 (save result)
+
+    ;; --- print 49 ---
+    closure r1, 2             ;; r1 = io.print_i64
+    move r2, r4               ;; r2 = 49
+    call r1, 1, 0             ;; print_i64(49)
+
     halt
   end

@@ -1,0 +1,63 @@
+.module "fib"
+.entry 0
+
+.import
+  io.print_i64
+
+;; Recursive fibonacci: fib(10) = 55
+;;
+;; fib(n) = n                    if n <= 1
+;;          fib(n-1) + fib(n-2)  otherwise
+
+.constants
+  0 i64 10                    ;; input for fib
+  1 i64 1                     ;; used for base-case check and decrement
+
+.callables
+  0 function 1                ;; fib (recursive self-reference)
+  1 io.print_i64
+
+.functions
+  0 "main" regs=4
+    loadk r1, 0               ;; r1 = 10 (arg for fib)
+    closure r0, 0             ;; r0 = fib function ref
+    call r0, 1, 1             ;; r0 = fib(10) = 55
+
+    closure r2, 1             ;; r2 = io.print_i64
+    move r3, r0               ;; r3 = 55
+    call r2, 1, 0             ;; print_i64(55)
+    halt
+  end
+
+  1 "fib" regs=7
+    ;; r0 = n (argument)
+    loadk r6, 1               ;; r6 = 1
+
+    ;; base case: n <= 1
+    gt.i64 r2, r0, r6         ;; r2 = (n > 1)?
+    jmpifnot r2, @base        ;; if n <= 1, return n
+
+    ;; recursive case: n > 1
+    move r3, r0               ;; r3 = n (save original n)
+    closure r4, 0             ;; r4 = fib function ref (for recursive calls)
+
+    ;; fib(n-1)
+    sub.i64 r5, r3, r6        ;; r5 = n - 1
+    move r0, r4               ;; r0 = fib ref
+    move r1, r5               ;; r1 = n-1
+    call r0, 1, 1             ;; r0 = fib(n-1)
+    move r5, r0               ;; r5 = fib(n-1) result
+
+    ;; fib(n-2)
+    sub.i64 r1, r3, r6        ;; r1 = n - 1
+    sub.i64 r1, r1, r6        ;; r1 = n - 2
+    move r0, r4               ;; r0 = fib ref
+    call r0, 1, 1             ;; r0 = fib(n-2)
+
+    ;; fib(n-1) + fib(n-2)
+    add.i64 r1, r5, r0        ;; r1 = fib(n-1) + fib(n-2)
+    ret r1, 1                 ;; return result
+
+  @base:
+    ret r0, 1                 ;; return n (base case)
+  end
