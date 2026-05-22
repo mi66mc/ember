@@ -1,9 +1,13 @@
+use std::collections::BTreeMap;
+
 use crate::bytecode::instruction::Instruction;
+use crate::bytecode::module::SourceLocation;
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub code: Vec<Instruction>,
     pub max_registers: u8,
+    pub source_map: BTreeMap<u32, SourceLocation>,
 }
 
 impl Chunk {
@@ -11,6 +15,7 @@ impl Chunk {
         Chunk {
             code: Vec::new(),
             max_registers: 0,
+            source_map: BTreeMap::new(),
         }
     }
 
@@ -26,6 +31,10 @@ impl Chunk {
 
     pub fn is_empty(&self) -> bool {
         self.code.is_empty()
+    }
+
+    pub fn source_location(&self, pc: usize) -> Option<&SourceLocation> {
+        self.source_map.get(&(pc as u32))
     }
 }
 

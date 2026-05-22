@@ -208,6 +208,7 @@ pub enum VMError {
 pub struct FrameInfo {
     pub function_name: String,
     pub pc: usize,
+    pub source_line: Option<u32>,
 }
 
 pub struct Vm {
@@ -244,7 +245,7 @@ impl Vm {
     pub fn run(&mut self, chunk: Chunk) -> Result<(), VMError> {
         let mut module = Module::new("<chunk>");
         module.entry = Some(0);
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "main".to_string(),
             chunk,
         });
@@ -283,6 +284,7 @@ impl Vm {
                             FrameInfo {
                                 function_name: f.function_name.clone(),
                                 pc: f.pc,
+                                source_line: f.chunk.source_location(f.pc).map(|l| l.line),
                             }
                         }).collect();
                         error = VMError::Runtime {
@@ -779,7 +781,7 @@ mod tests {
     fn module_for(chunk: Chunk) -> Module {
         let mut module = Module::new("test");
         module.entry = Some(0);
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "main".to_string(),
             chunk,
         });
@@ -839,11 +841,11 @@ mod tests {
         module.entry = Some(0);
         module.constants = vec![Constant::I64(10), Constant::I64(20)];
         module.callables = vec![Callable::Function(1)];
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "main".to_string(),
             chunk: main,
         });
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "add".to_string(),
             chunk: add,
         });
@@ -883,11 +885,11 @@ mod tests {
         module.entry = Some(0);
         module.constants = vec![Constant::I64(1), Constant::I64(2)];
         module.callables = vec![Callable::Function(1)];
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "main".to_string(),
             chunk: main,
         });
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "pair".to_string(),
             chunk: pair,
         });
@@ -926,15 +928,15 @@ mod tests {
         module.entry = Some(0);
         module.constants = vec![Constant::I64(7)];
         module.callables = vec![Callable::Function(1), Callable::Function(2)];
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "main".to_string(),
             chunk: main,
         });
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "middle".to_string(),
             chunk: middle,
         });
-        module.functions.push(Function {
+        module.functions.push(Function { 
             name: "leaf".to_string(),
             chunk: leaf,
         });

@@ -120,6 +120,7 @@ mod tests {
         Rc::new(Chunk {
             code: Vec::new(),
             max_registers: max_regs,
+            source_map: std::collections::BTreeMap::new(),
         })
     }
 

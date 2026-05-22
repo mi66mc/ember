@@ -7,6 +7,12 @@ pub enum Callable {
     Import(u32),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub line: u32,
+    pub column: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,

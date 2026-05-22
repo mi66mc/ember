@@ -114,7 +114,7 @@ pub fn decode_module(bytes: &[u8]) -> Result<Module, BinaryError> {
     for _ in 0..function_count {
         let name = reader.read_string()?;
         let chunk = decode_chunk(&mut reader)?;
-        module.functions.push(Function { name, chunk });
+        module.functions.push(Function {  name, chunk });
     }
     Ok(module)
 }

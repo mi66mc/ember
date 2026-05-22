@@ -139,7 +139,17 @@ fn run_module(module: Module) -> Result<(), String> {
 }
 
 fn format_vm_error(error: VMError) -> String {
-    match error {
+    match &error {
+        VMError::Runtime { message, backtrace } => {
+            let mut out = format!("runtime error: {message}\n");
+            for frame in backtrace {
+                match frame.source_line {
+                    Some(line) => out.push_str(&format!("  at {}:{} (line {})\n", frame.function_name, frame.pc, line)),
+                    None => out.push_str(&format!("  at {}:{}\n", frame.function_name, frame.pc)),
+                }
+            }
+            out
+        }
         VMError::NativeError(message) => format!("native error: {message}"),
         other => format!("runtime error: {other:?}"),
     }

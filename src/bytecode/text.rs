@@ -1,6 +1,7 @@
 use crate::bytecode::{
     Callable, Chunk, Constant, Function, Instruction, Module, Opcode,
 };
+use crate::bytecode::module::SourceLocation;
 use crate::vm::native::ImportDecl;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,10 +177,9 @@ fn parse_function_body(
             if tokens.len() > 1 {
                 tokens[1..].to_vec()
             } else {
-                continue; // Just a label, no instruction
+                continue;
             }
         } else if first.starts_with('@') && first.len() > 1 {
-            // Standalone label declaration: @name
             if tokens.len() > 1 && is_instruction(&tokens[1..]) {
                 tokens[1..].to_vec()
             } else {
@@ -221,10 +221,15 @@ fn parse_function_body(
             })
             .collect();
 
+        let pc_before = function.chunk.len();
         let instrs = parse_instruction(&resolved, line_no)?;
         for instr in instrs {
             function.chunk.emit(instr);
         }
+        function.chunk.source_map.insert(pc_before as u32, SourceLocation {
+            line: line_no as u32,
+            column: 1,
+        });
     }
 
     Ok(function)
