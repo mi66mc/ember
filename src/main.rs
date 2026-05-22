@@ -35,12 +35,6 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
             println!("ok");
             Ok(())
         }
-        "test" => {
-            let path = arg_path(&args, 1)?;
-            let module = load_module_with_links(&path)?;
-            check_imports(&module)?;
-            run_tests(module)
-        }
         "build" => {
             let input = arg_path(&args, 1)?;
             let output = parse_output_path(&args)?;
@@ -70,7 +64,7 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage:\n  ember run <file.embt|file.emb>\n  ember check <file.embt|file.emb>\n  ember test <file.embt|file.emb>\n  ember build <input.embt> -o <output.emb>\n  ember disasm <file.embt|file.emb>\n  ember dump <file.embt|file.emb>".to_string()
+    "usage:\n  ember run <file.embt|file.emb>\n  ember check <file.embt|file.emb>\n  ember build <input.embt> -o <output.emb>\n  ember disasm <file.embt|file.emb>\n  ember dump <file.embt|file.emb>".to_string()
 }
 
 fn arg_path(args: &[String], index: usize) -> Result<PathBuf, String> {
@@ -142,53 +136,6 @@ fn require_entry(module: &Module) -> Result<(), String> {
 fn run_module(module: Module) -> Result<(), String> {
     let mut vm = Vm::with_linker(1024 * 1024, std_linker());
     vm.run_module(module).map_err(format_vm_error)
-}
-
-fn run_tests(module: Module) -> Result<(), String> {
-    let test_indices: Vec<(u32, String)> = module
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| f.name.starts_with("test_"))
-        .map(|(idx, f)| (idx as u32, f.name.clone()))
-        .collect();
-
-    if test_indices.is_empty() {
-        println!("0 tests found");
-        return Ok(());
-    }
-
-    let mut passed = 0;
-    let mut failed = 0;
-
-    for (idx, name) in &test_indices {
-        let mut test_module = Module::new(module.name.clone());
-        test_module.version = module.version;
-        test_module.constants = module.constants.clone();
-        test_module.imports = module.imports.clone();
-        test_module.callables = module.callables.clone();
-        test_module.functions = module.functions.clone();
-        test_module.entry = Some(*idx);
-
-        let mut vm = Vm::with_linker(1024 * 1024, std_linker());
-        match vm.run_module(test_module) {
-            Ok(()) => {
-                passed += 1;
-                println!("  ok {name}");
-            }
-            Err(error) => {
-                failed += 1;
-                println!("  FAIL {name}: {}", format_vm_error(error));
-            }
-        }
-    }
-
-    println!("\n{passed} passed, {failed} failed");
-    if failed > 0 {
-        Err("some tests failed".to_string())
-    } else {
-        Ok(())
-    }
 }
 
 fn format_vm_error(error: VMError) -> String {

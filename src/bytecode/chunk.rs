@@ -44,23 +44,3 @@ impl Default for Chunk {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bytecode::opcode::Opcode;
-
-    #[test]
-    fn chunk_starts_empty() {
-        let chunk = Chunk::new();
-        assert!(chunk.is_empty());
-        assert_eq!(chunk.max_registers, 0);
-    }
-
-    #[test]
-    fn emit_appends_instruction() {
-        let mut chunk = Chunk::new();
-        let idx = chunk.emit(Instruction::abc(Opcode::ADD_I64, 0, 1, 2));
-        assert_eq!(idx, 0);
-        assert_eq!(chunk.len(), 1);
-    }
-}

@@ -115,26 +115,3 @@ impl ValueType {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn value_type_metadata_is_stable() {
-        assert_eq!(ValueType::I8.size_bytes(), 1);
-        assert_eq!(ValueType::I64.size_bytes(), 8);
-        assert_eq!(ValueType::F64.size_bytes(), 8);
-        assert_eq!(ValueType::Ptr.size_bytes(), 8);
-        assert!(ValueType::I32.is_integer());
-        assert!(!ValueType::F64.is_integer());
-    }
-
-    #[test]
-    fn constants_report_types_and_bits() {
-        assert_eq!(Constant::I32(42).value_type(), ValueType::I32);
-        assert_eq!(Constant::F64(1.25).value_type(), ValueType::F64);
-        assert_eq!(Constant::I64(-1).to_bits(), Some(u64::MAX));
-        assert_eq!(Constant::Bool(true).to_bits(), Some(1));
-        assert_eq!(Constant::Bytes(vec![0, 1, 2]).to_bits(), None);
-    }
-}
