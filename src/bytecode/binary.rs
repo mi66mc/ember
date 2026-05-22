@@ -28,7 +28,7 @@ pub fn encode_module(module: &Module) -> Result<Vec<u8>, BinaryError> {
 
     write_u32(&mut out, module.imports.len() as u32)?;
     for import in &module.imports {
-        out.push(import.is_native() as u8);
+        out.push(if import.is_native() { 0 } else { 1 });
         write_string(&mut out, import.module_name())?;
         write_string(&mut out, import.function_name())?;
     }
