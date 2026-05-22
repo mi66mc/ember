@@ -247,6 +247,7 @@ pub fn std_linker() -> NativeLinker {
     let mut linker = NativeLinker::default();
     linker.mount(Io);
     linker.mount(Core);
+    linker.mount(Math);
     linker
 }
 
@@ -356,6 +357,46 @@ impl NativeModule for Core {
             "alloc" => Some(0),
             "memcpy" => Some(1),
             "memset" => Some(2),
+            _ => None,
+        }
+    }
+}
+
+fn sqrt_f64(args: &[VmValue]) -> NativeResult {
+    let value = unsafe { scalar_arg(args, "math.sqrt")?.f64 };
+    Ok(vec![VmValue::scalar(Register::from_f64(value.sqrt()))])
+}
+
+fn abs_i64(args: &[VmValue]) -> NativeResult {
+    let value = unsafe { scalar_arg(args, "math.abs_i64")?.i64 };
+    Ok(vec![VmValue::scalar(Register::from_i64(value.abs()))])
+}
+
+pub struct Math;
+
+impl NativeModule for Math {
+    fn name(&self) -> &str {
+        "math"
+    }
+
+    fn exports(&self) -> u16 {
+        2
+    }
+
+    fn call(&self, index: u16, args: &[VmValue], _memory: &mut Memory) -> NativeResult {
+        match index {
+            0 => sqrt_f64(args),
+            1 => abs_i64(args),
+            _ => Err(NativeError::new(format!(
+                "math: unknown function {index}"
+            ))),
+        }
+    }
+
+    fn function_index(&self, name: &str) -> Option<u16> {
+        match name {
+            "sqrt" => Some(0),
+            "abs_i64" => Some(1),
             _ => None,
         }
     }

@@ -72,6 +72,15 @@ pub fn link_modules(
     let mut merged = Module::new(root.name);
     merged.version = root.version;
 
+    for l in &linked {
+        if l.version > root.version {
+            return Err(format!(
+                "linked module `{}` version {} exceeds root version {}",
+                l.name, l.version, root.version
+            ));
+        }
+    }
+
     // Merge constants from dependencies first
     for l in &linked {
         merged.constants.extend(l.constants.clone());

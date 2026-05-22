@@ -9,6 +9,7 @@
 pub struct Memory {
     data: Vec<u8>,
     bump: usize,
+    free_list: Vec<(usize, usize)>, // (addr, size)
 }
 
 impl Memory {
@@ -16,6 +17,7 @@ impl Memory {
         Memory {
             data: vec![0; initial_size],
             bump: 0,
+            free_list: Vec::new(),
         }
     }
 
@@ -30,6 +32,16 @@ impl Memory {
     }
 
     pub fn alloc(&mut self, size: usize) -> usize {
+        // Try to find a free block that fits
+        if let Some(pos) = self.free_list.iter().position(|&(_, block_size)| block_size >= size) {
+            let (addr, block_size) = self.free_list.swap_remove(pos);
+            if block_size > size {
+                // Split: put remainder back
+                self.free_list.push((addr + size, block_size - size));
+            }
+            return addr;
+        }
+        // Fall back to bump allocation
         let end = self.bump + size;
         if end > self.data.len() {
             self.grow(end - self.data.len());
@@ -39,12 +51,13 @@ impl Memory {
         ptr
     }
 
-    pub fn free(&mut self, _ptr: usize) {
-        // no-op bump allocator
+    pub fn free(&mut self, ptr: usize, size: usize) {
+        self.free_list.push((ptr, size));
     }
 
     pub fn reset(&mut self) {
         self.bump = 0;
+        self.free_list.clear();
     }
 
     pub fn bump_ptr(&self) -> usize {

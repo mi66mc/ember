@@ -1,0 +1,37 @@
+.module "tests"
+
+.import
+  io.print_i64
+
+.constants
+  0 i64 2
+  1 i64 3
+  2 i64 6
+
+.callables
+  0 io.print_i64
+
+.functions
+  0 "main" regs=2
+    closure r0, 0
+    loadk r1, 2
+    call r0, 1, 0
+    halt
+  end
+
+  1 "test_simple" regs=1
+    halt
+  end
+
+  2 "test_assert" regs=5
+    loadk r0, 0
+    loadk r1, 1
+    mul.i64 r2, r0, r1
+    loadk r3, 2
+    eq.i64 r4, r2, r3
+    jmpifnot r4, @fail
+    halt
+    @fail:
+    div.i64 r0, r0, r1
+    halt
+  end
