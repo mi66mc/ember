@@ -67,13 +67,16 @@ Native functions receive `&[VmValue]` and return `NativeResult = Result<Vec<VmVa
 
 ### `core` — Memory Management
 
-3 exports.
+6 exports.
 
 | Index | Function | Arguments | Returns | Description |
 |-------|----------|-----------|---------|-------------|
-| 0 | `alloc` | `size: u64` | `ptr: u64` | Allocate `size` bytes in linear memory. Returns the base address. Grows memory automatically if needed. |
-| 1 | `memcpy` | `dst: u64, src: u64, len: u64` | — | Copy `len` bytes from `src` to `dst` in linear memory. Errors if either range is out of bounds. |
-| 2 | `memset` | `dst: u64, byte: u8, len: u64` | — | Fill `len` bytes at `dst` with `byte`. Errors if range is out of bounds. |
+| 0 | `malloc` | `size: u64` | `ptr: u64` | Allocate `size` bytes in linear memory. No GC tracking. Free with `free(ptr)`. Returns pointer past 8-byte size header. |
+| 1 | `free` | `ptr: u64` | — | Free a block allocated by `malloc`. Reads block size from internal header. |
+| 2 | `memcpy` | `dst: u64, src: u64, len: u64` | — | Copy `len` bytes from `src` to `dst` in linear memory. Errors if either range is out of bounds. |
+| 3 | `memset` | `dst: u64, byte: u8, len: u64` | — | Fill `len` bytes at `dst` with `byte`. Errors if range is out of bounds. |
+| 4 | `alloc_gc` | `type_tag: u8, size: u64` | `ptr: u64` | Allocate `size` bytes on the GC-managed heap with a type tag. Returns pointer past 2-byte `[mark][tag]` header. Collected automatically when no register references the pointer. |
+| 5 | `gc_collect` | — | — | Trigger a manual GC cycle. Roots are all `ptr` values in active stack frames. |
 
 ### `math` — Mathematics
 

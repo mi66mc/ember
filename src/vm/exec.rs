@@ -328,16 +328,17 @@ impl Vm {
                 crate::vm::stack::MAX_REGISTERS
             )));
         }
+        // Pre-load Bytes constants into VM memory at startup.
+        // Offsets are stored (not raw pointers) to survive Vec reallocations.
         self.constant_section.clear();
         for (idx, constant) in module.constants.iter().enumerate() {
             if let Constant::Bytes(bytes) = constant {
-                let len = bytes.len();
-                let ptr = self.memory.alloc(len);
+                let offset = self.memory.alloc(bytes.len());
                 unsafe {
-                    let dst = self.memory.as_mut_ptr().add(ptr);
-                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+                    let dst = self.memory.as_mut_ptr().add(offset);
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
                 }
-                self.constant_section.insert(idx, ptr);
+                self.constant_section.insert(idx, offset);
             }
         }
         self.module = Some(Rc::new(module));
@@ -460,12 +461,11 @@ impl Vm {
                     .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
                     .clone();
                 match constant {
-                    Constant::Bytes(_bytes) => {
-                        if let Some(&ptr) = self.constant_section.get(&bx) {
-                            self.set_scalar(instr.a(), Register::from_ptr(ptr))?;
-                        } else {
-                            return Err(VMError::InvalidConstantIndex(instr.bx()));
-                        }
+                    Constant::Bytes(_) => {
+                        let offset = self.constant_section.get(&bx)
+                            .copied()
+                            .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
+                        self.set_scalar(instr.a(), Register::from_ptr(offset))?;
                     }
                     constant => self.set_scalar(
                         instr.a(),

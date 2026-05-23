@@ -2,10 +2,10 @@
 .entry 0
 
 .import
-  core.alloc
+  core.malloc
   io.print_i64
 
-;; Allocates memory, stores five i64 values [10,20,30,40,50],
+;; Allocates memory with core.malloc, stores five i64 values [10,20,30,40,50],
 ;; loads them back, sums them, and prints the result (150).
 
 .constants
@@ -17,13 +17,13 @@
   5 i64 50                    ;; value 5
 
 .callables
-  0 core.alloc
+  0 core.malloc
   1 io.print_i64
 
 .functions
   0 "main" regs=10
-    ;; allocate 40 bytes
-    closure r0, 0, 0           ;; r0 = core.alloc
+    ;; allocate 40 bytes (manual, no GC)
+    closure r0, 0, 0           ;; r0 = core.malloc
     loadk r1, 0               ;; r1 = 40
     call r0, 1, 1             ;; r0 = ptr (returned from alloc)
     move r6, r0               ;; r6 = saved pointer

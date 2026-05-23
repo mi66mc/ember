@@ -61,6 +61,28 @@ impl Memory {
         ptr
     }
 
+    // ── malloc (manual, no GC, with 8-byte size header) ──────
+
+    /// Allocate a manually-managed block with an 8-byte size header.
+    /// Returns pointer to the payload (past the header).
+    /// Free with `free_malloc(ptr)` — no size needed.
+    pub fn malloc(&mut self, size: usize) -> usize {
+        let total = size + 8;
+        let header = self.alloc(total);
+        unsafe { (self.data.as_mut_ptr().add(header) as *mut u64).write_unaligned(size as u64); }
+        header + 8
+    }
+
+    /// Free a block allocated by `malloc`. Reads the size from the header.
+    pub fn free_malloc(&mut self, payload_ptr: usize) {
+        if payload_ptr < 8 {
+            return;
+        }
+        let header = payload_ptr - 8;
+        let size = unsafe { (self.data.as_ptr().add(header) as *const u64).read_unaligned() } as usize;
+        self.free_list.push((header, size + 8));
+    }
+
     // ── Managed allocation (GC-tracked) ──────────────────
 
     pub fn needs_gc(&self) -> bool {

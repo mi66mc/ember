@@ -227,20 +227,34 @@ pub fn std_linker() -> NativeLinker {
     linker
 }
 
-fn alloc(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn malloc_native(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     // SAFETY: see file-level safety contract; the size argument was written
     // via from_u64 by the compiler
     let size = unsafe {
         if args.is_empty() {
-            return Err(NativeError::new("core.alloc expects 1 argument (size)"));
+            return Err(NativeError::new("core.malloc expects 1 argument (size)"));
         }
         args[0]
             .as_scalar()
-            .ok_or_else(|| NativeError::new("core.alloc expects a scalar argument"))?
+            .ok_or_else(|| NativeError::new("core.malloc expects a scalar argument"))?
             .u64 as usize
     };
-    let ptr = memory.alloc(size);
+    let ptr = memory.malloc(size);
     Ok(vec![VmValue::scalar(Register::from_ptr(ptr))])
+}
+
+fn free_native(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+    let ptr = unsafe {
+        if args.is_empty() {
+            return Err(NativeError::new("core.free expects 1 argument (ptr)"));
+        }
+        args[0]
+            .as_scalar()
+            .ok_or_else(|| NativeError::new("core.free expects a scalar argument"))?
+            .ptr
+    };
+    memory.free_malloc(ptr);
+    Ok(Vec::new())
 }
 
 fn memcpy(args: &[VmValue], memory: &mut Memory) -> NativeResult {
@@ -318,22 +332,22 @@ fn memset(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     Ok(Vec::new())
 }
 
-fn alloc_managed(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn alloc_gc(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     if args.len() < 2 {
         return Err(NativeError::new(
-            "core.alloc_managed expects 2 arguments (type_tag, size)",
+            "core.alloc_gc expects 2 arguments (type_tag, size)",
         ));
     }
     let type_tag = unsafe {
         args[0]
             .as_scalar()
-            .ok_or_else(|| NativeError::new("core.alloc_managed: type_tag must be scalar"))?
+            .ok_or_else(|| NativeError::new("core.alloc_gc: type_tag must be scalar"))?
             .u8
     };
     let size = unsafe {
         args[1]
             .as_scalar()
-            .ok_or_else(|| NativeError::new("core.alloc_managed: size must be scalar"))?
+            .ok_or_else(|| NativeError::new("core.alloc_gc: size must be scalar"))?
             .u64 as usize
     };
     let ptr = memory.alloc_managed(type_tag, size, &[]);
@@ -358,16 +372,17 @@ impl NativeModule for Core {
     }
 
     fn exports(&self) -> u16 {
-        5
+        6
     }
 
     fn call(&self, index: u16, args: &[VmValue], memory: &mut Memory) -> NativeResult {
         match index {
-            0 => alloc(args, memory),
-            1 => memcpy(args, memory),
-            2 => memset(args, memory),
-            3 => alloc_managed(args, memory),
-            4 => gc_collect(args, memory),
+            0 => malloc_native(args, memory),
+            1 => free_native(args, memory),
+            2 => memcpy(args, memory),
+            3 => memset(args, memory),
+            4 => alloc_gc(args, memory),
+            5 => gc_collect(args, memory),
             _ => Err(NativeError::new(format!(
                 "core: unknown function {index}"
             ))),
@@ -376,11 +391,12 @@ impl NativeModule for Core {
 
     fn function_index(&self, name: &str) -> Option<u16> {
         match name {
-            "alloc" => Some(0),
-            "memcpy" => Some(1),
-            "memset" => Some(2),
-            "alloc_managed" => Some(3),
-            "gc_collect" => Some(4),
+            "malloc" => Some(0),
+            "free" => Some(1),
+            "memcpy" => Some(2),
+            "memset" => Some(3),
+            "alloc_gc" => Some(4),
+            "gc_collect" => Some(5),
             _ => None,
         }
     }
