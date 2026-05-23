@@ -12,6 +12,7 @@ pub struct Frame {
     pub(crate) return_base: Option<u8>,
     pub(crate) expected_returns: u8,
     pub(crate) function_name: String,
+    pub(crate) handlers: Vec<u32>,
 }
 
 impl Frame {
@@ -32,6 +33,7 @@ impl Frame {
             return_base,
             expected_returns,
             function_name: name.into(),
+            handlers: Vec::new(),
         }
     }
 
@@ -60,8 +62,37 @@ impl Frame {
         }
     }
 
+    pub fn get_mut(&mut self, idx: u8) -> Option<&mut VmValue> {
+        self.registers.get_mut(idx as usize)
+    }
+
     pub fn get_scalar(&self, idx: u8) -> Option<Register> {
         self.get(idx).and_then(VmValue::as_scalar)
+    }
+
+    pub fn push_handler(&mut self, handler_pc: u32) {
+        self.handlers.push(handler_pc);
+    }
+
+    pub fn pop_handler(&mut self) -> Option<u32> {
+        self.handlers.pop()
+    }
+
+    pub fn current_handler(&self) -> Option<u32> {
+        self.handlers.last().copied()
+    }
+
+    pub fn collect_roots(&self) -> Vec<usize> {
+        let mut roots = Vec::new();
+        for value in self.registers.iter() {
+            if let VmValue::Scalar(register) = value {
+                let ptr = unsafe { register.ptr };
+                if ptr != 0 {
+                    roots.push(ptr);
+                }
+            }
+        }
+        roots
     }
 }
 
@@ -135,6 +166,7 @@ mod tests {
             code: Vec::new(),
             max_registers: max_regs,
             source_map: std::collections::BTreeMap::new(),
+            exception_table: Vec::new(),
         })
     }
 

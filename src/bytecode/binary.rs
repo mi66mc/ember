@@ -310,7 +310,7 @@ mod tests {
               0 io.print_i64
             .functions
               0 "main" regs=2
-                closure r0, 0
+                closure r0, 0, 0
                 loadk r1, 0
                 call r0, 1, 0
                 halt

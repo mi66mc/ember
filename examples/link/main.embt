@@ -23,23 +23,23 @@
   0 "main" regs=5
     ;; --- double(21) ---
     loadk r1, 0               ;; r1 = 21 (arg)
-    closure r0, 0             ;; r0 = double function ref
+    closure r0, 0, 0           ;; r0 = double function ref
     call r0, 1, 1             ;; r0 = double(21) = 42
     move r3, r0               ;; r3 = 42 (save result)
 
     ;; --- print 42 ---
-    closure r1, 2             ;; r1 = io.print_i64
+    closure r1, 2, 0           ;; r1 = io.print_i64
     move r2, r3               ;; r2 = 42
     call r1, 1, 0             ;; print_i64(42)
 
     ;; --- square(7) ---
     loadk r1, 1               ;; r1 = 7 (arg)
-    closure r0, 1             ;; r0 = square function ref
+    closure r0, 1, 0           ;; r0 = square function ref
     call r0, 1, 1             ;; r0 = square(7) = 49
     move r4, r0               ;; r4 = 49 (save result)
 
     ;; --- print 49 ---
-    closure r1, 2             ;; r1 = io.print_i64
+    closure r1, 2, 0           ;; r1 = io.print_i64
     move r2, r4               ;; r2 = 49
     call r1, 1, 0             ;; print_i64(49)
 

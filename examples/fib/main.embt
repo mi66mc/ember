@@ -20,10 +20,10 @@
 .functions
   0 "main" regs=4
     loadk r1, 0               ;; r1 = 10 (arg for fib)
-    closure r0, 0             ;; r0 = fib function ref
+    closure r0, 0, 0           ;; r0 = fib function ref
     call r0, 1, 1             ;; r0 = fib(10) = 55
 
-    closure r2, 1             ;; r2 = io.print_i64
+    closure r2, 1, 0           ;; r2 = io.print_i64
     move r3, r0               ;; r3 = 55
     call r2, 1, 0             ;; print_i64(55)
     halt
@@ -39,7 +39,7 @@
 
     ;; recursive case: n > 1
     move r3, r0               ;; r3 = n (save original n)
-    closure r4, 0             ;; r4 = fib function ref (for recursive calls)
+    closure r4, 0, 0           ;; r4 = fib function ref (for recursive calls)
 
     ;; fib(n-1)
     sub.i64 r5, r3, r6        ;; r5 = n - 1

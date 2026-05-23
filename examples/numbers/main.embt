@@ -22,7 +22,7 @@
     mul.i64 r3, r0, r1        ;; r3 = 7 * 6 = 42
     add.i64 r3, r3, r2        ;; r3 = 42 + 3 = 45
 
-    closure r0, 0             ;; r0 = io.print_i64
+    closure r0, 0, 0           ;; r0 = io.print_i64
     move r1, r3               ;; r1 = 45
     call r0, 1, 0             ;; print_i64(45)
     halt

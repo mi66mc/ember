@@ -30,7 +30,7 @@
     jmp @loop                 ;; repeat
 
   @end:
-    closure r1, 0             ;; r1 = io.print_i64
+    closure r1, 0, 0           ;; r1 = io.print_i64
     move r2, r0               ;; r2 = 55
     call r1, 1, 0             ;; print_i64(55)
     halt

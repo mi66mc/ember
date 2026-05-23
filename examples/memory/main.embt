@@ -23,7 +23,7 @@
 .functions
   0 "main" regs=10
     ;; allocate 40 bytes
-    closure r0, 0             ;; r0 = core.alloc
+    closure r0, 0, 0           ;; r0 = core.alloc
     loadk r1, 0               ;; r1 = 40
     call r0, 1, 1             ;; r0 = ptr (returned from alloc)
     move r6, r0               ;; r6 = saved pointer
@@ -59,7 +59,7 @@
     add.i64 r9, r9, r7        ;; r9 = 150
 
     ;; print sum
-    closure r1, 1             ;; r1 = io.print_i64
+    closure r1, 1, 0           ;; r1 = io.print_i64
     move r2, r9               ;; r2 = 150
     call r1, 1, 0             ;; print_i64(150)
     halt

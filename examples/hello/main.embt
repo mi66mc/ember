@@ -16,7 +16,7 @@
 
 .functions
   0 "main" regs=3
-    closure r0, 0             ;; r0 = io.print_mem
+    closure r0, 0, 0           ;; r0 = io.print_mem
     loadk r1, 0               ;; r1 = ptr to "hello from ember"
     loadk r2, 1               ;; r2 = 16 (len)
     call r0, 2, 0             ;; print_mem(ptr=r1, len=r2)

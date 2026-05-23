@@ -196,9 +196,17 @@ opcodes! {
     JMPIF = 0xD1,
     JMPIFNOT = 0xD2,
 
+    TRY = 0xD3,
+    ENDTRY = 0xD4,
+    THROW = 0xD5,
+
+    GETUPVAL = 0xD6,
+
     CLOSURE = 0xD7,
     CALL = 0xD8,
     RET = 0xD9,
+
+    SETUPVAL = 0xDA,
 
     GETG = 0xE0,
     SETG = 0xE1,

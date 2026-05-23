@@ -248,10 +248,12 @@ fn is_instruction(tokens: &[String]) -> bool {
             | "ret"
             | "jmp" | "jmpx"
             | "jmpif" | "jmpifnot"
+            | "getupval" | "setupval"
             | "getg"
             | "setg"
             | "move"
             | "conv"
+            | "try" | "endtry" | "throw"
     ) || first.contains('.')
         || first
             .chars()
@@ -358,18 +360,23 @@ pub fn format_instruction(instr: &Instruction) -> String {
     match instr.opcode() {
         Opcode::LOADK => format!("loadk r{}, {}", instr.a(), instr.bx()),
         Opcode::MOVE => format!("move r{}, r{}", instr.a(), instr.b()),
-        Opcode::CLOSURE => format!("closure r{}, {}", instr.a(), instr.bx()),
+        Opcode::CLOSURE => format!("closure r{}, {}, {}", instr.a(), instr.b(), instr.c()),
         Opcode::CALL => format!("call r{}, {}, {}", instr.a(), instr.b(), instr.c()),
         Opcode::RET => format!("ret r{}, {}", instr.a(), instr.b()),
         Opcode::JMP => format!("jmp {}", instr.sbx_ab()),
         Opcode::JMPIF => format!("jmpif r{}, {}", instr.a(), instr.sbx()),
         Opcode::JMPIFNOT => format!("jmpifnot r{}, {}", instr.a(), instr.sbx()),
+        Opcode::GETUPVAL => format!("getupval r{}, {}, r{}", instr.a(), instr.b(), instr.c()),
+        Opcode::SETUPVAL => format!("setupval r{}, {}, r{}", instr.a(), instr.b(), instr.c()),
         Opcode::GETG => format!("getg r{}, {}", instr.a(), instr.bx()),
         Opcode::SETG => format!("setg r{}, {}", instr.a(), instr.bx()),
         Opcode::NOP => "nop".to_string(),
         Opcode::HALT => "halt".to_string(),
         Opcode::EXT => "ext".to_string(),
         Opcode::CONV => format!("conv r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
+        Opcode::TRY => format!("try {}", instr.bx()),
+        Opcode::ENDTRY => "endtry".to_string(),
+        Opcode::THROW => format!("throw r{}", instr.a()),
 
         op => {
             let name = lowercase_opcode(op);
@@ -417,10 +424,10 @@ fn validate_instruction(
         }
         Opcode::CLOSURE => {
             check_reg(instr.a())?;
-            if instr.bx() as usize >= module.callables.len() {
+            if instr.b() as usize >= module.callables.len() {
                 return Err(format!(
                     "function {function_id} instruction {pc} references missing callable {}",
-                    instr.bx()
+                    instr.b()
                 ));
             }
         }
@@ -441,8 +448,17 @@ fn validate_instruction(
                 ));
             }
         }
-        Opcode::HALT | Opcode::NOP | Opcode::JMP | Opcode::EXT => {}
+        Opcode::HALT | Opcode::NOP | Opcode::JMP | Opcode::EXT | Opcode::TRY | Opcode::ENDTRY => {}
         Opcode::JMPIF | Opcode::JMPIFNOT => check_reg(instr.a())?,
+        Opcode::THROW => check_reg(instr.a())?,
+        Opcode::GETUPVAL => {
+            check_reg(instr.a())?;
+            check_reg(instr.c())?;
+        }
+        Opcode::SETUPVAL => {
+            check_reg(instr.a())?;
+            check_reg(instr.c())?;
+        }
         _ => {
             match instruction_format(instr.opcode()) {
                 InstrFormat::RRR => {
@@ -843,19 +859,20 @@ fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Vec<Instructio
             vec![ext, instr]
         }
         "closure" => {
-            expect_len(tokens, 3, line_no)?;
-            vec![Instruction::abx(
+            expect_len(tokens, 4, line_no)?;
+            vec![Instruction::abc(
                 Opcode::CLOSURE,
                 parse_reg(&tokens[1], line_no)?,
-                parse_u16(&tokens[2], line_no)?,
+                parse_u8(&tokens[2], line_no)?,
+                parse_u8(&tokens[3], line_no)?,
             )]
         }
         "closurex" => {
-            expect_len(tokens, 3, line_no)?;
-            let (ext, instr) = emit_ext_abx(
-                Opcode::CLOSURE,
+            expect_len(tokens, 4, line_no)?;
+            let (ext, instr) = emit_ext_closure(
                 parse_reg(&tokens[1], line_no)?,
                 parse_u32(&tokens[2], line_no)?,
+                parse_u8(&tokens[3], line_no)?,
             )?;
             vec![ext, instr]
         }
@@ -866,6 +883,24 @@ fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Vec<Instructio
                 parse_reg(&tokens[1], line_no)?,
                 parse_u8(&tokens[2], line_no)?,
                 parse_u8(&tokens[3], line_no)?,
+            )]
+        }
+        "getupval" => {
+            expect_len(tokens, 4, line_no)?;
+            vec![Instruction::abc(
+                Opcode::GETUPVAL,
+                parse_reg(&tokens[1], line_no)?,
+                parse_u8(&tokens[2], line_no)?,
+                parse_reg(&tokens[3], line_no)?,
+            )]
+        }
+        "setupval" => {
+            expect_len(tokens, 4, line_no)?;
+            vec![Instruction::abc(
+                Opcode::SETUPVAL,
+                parse_reg(&tokens[1], line_no)?,
+                parse_u8(&tokens[2], line_no)?,
+                parse_reg(&tokens[3], line_no)?,
             )]
         }
         "ret" => {
@@ -927,6 +962,24 @@ fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Vec<Instructio
             )]
         }
         "conv" => vec![abc(tokens, line_no, Opcode::CONV)?],
+        "try" => {
+            expect_len(tokens, 2, line_no)?;
+            vec![Instruction::abx(
+                Opcode::TRY,
+                0,
+                parse_u16(&tokens[1], line_no)?,
+            )]
+        }
+        "endtry" => vec![Instruction::abc(Opcode::ENDTRY, 0, 0, 0)],
+        "throw" => {
+            expect_len(tokens, 2, line_no)?;
+            vec![Instruction::abc(
+                Opcode::THROW,
+                parse_reg(&tokens[1], line_no)?,
+                0,
+                0,
+            )]
+        }
         _ => {
             return Err(TextError::new(
                 line_no,
@@ -1204,6 +1257,20 @@ fn emit_ext_abx(
     Ok((ext, instr))
 }
 
+fn emit_ext_closure(
+    a: u8,
+    bx: u32,
+    upvalue_count: u8,
+) -> Result<(Instruction, Instruction), TextError> {
+    let lo = bx as u16;
+    let hi = (bx >> 16) as u16;
+    let [bl, bh] = hi.to_le_bytes();
+    let ext = Instruction::abc(Opcode::EXT, 0, bh, bl);
+    let lo_bytes = lo.to_le_bytes();
+    let instr = Instruction::abc(Opcode::CLOSURE, a, lo_bytes[0], upvalue_count);
+    Ok((ext, instr))
+}
+
 fn emit_ext_jmp(offset: i32) -> Result<(Instruction, Instruction), TextError> {
     let lo = offset as i16;
     let hi = (offset >> 16) as u16;
@@ -1235,7 +1302,7 @@ mod tests {
 
             .functions
               0 "main" regs=2
-                closure r0, 0
+                closure r0, 0, 0
                 loadk r1, 0
                 call r0, 1, 0
                 halt

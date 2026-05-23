@@ -3,11 +3,12 @@ use std::collections::BTreeMap;
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::module::SourceLocation;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
     pub(crate) code: Vec<Instruction>,
     pub(crate) max_registers: u8,
     pub(crate) source_map: BTreeMap<u32, SourceLocation>,
+    pub(crate) exception_table: Vec<(u32, u32, u32)>,
 }
 
 impl Chunk {
@@ -16,7 +17,19 @@ impl Chunk {
             code: Vec::new(),
             max_registers: 0,
             source_map: BTreeMap::new(),
+            exception_table: Vec::new(),
         }
+    }
+
+    pub fn add_exception_handler(&mut self, start: u32, end: u32, handler: u32) {
+        self.exception_table.push((start, end, handler));
+    }
+
+    pub fn find_handler(&self, pc: u32) -> Option<u32> {
+        self.exception_table
+            .iter()
+            .find(|(s, e, _)| pc >= *s && pc < *e)
+            .map(|(_, _, h)| *h)
     }
 
     pub fn emit(&mut self, instr: Instruction) -> usize {

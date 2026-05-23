@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::bytecode::{
@@ -236,6 +237,7 @@ pub enum VMError {
         message: String,
         backtrace: Vec<FrameInfo>,
     },
+    Thrown(VmValue),
     Halted,
 }
 
@@ -252,6 +254,7 @@ pub struct Vm {
     pub(crate) globals: Vec<VmValue>,
     pub(crate) linker: NativeLinker,
     module: Option<Rc<Module>>,
+    constant_section: HashMap<usize, usize>,
 }
 
 pub type VM = Vm;
@@ -266,6 +269,7 @@ impl Vm {
             globals: Vec::new(),
             linker: NativeLinker::default(),
             module: None,
+            constant_section: HashMap::new(),
         }
     }
 
@@ -276,6 +280,7 @@ impl Vm {
             globals: Vec::new(),
             linker,
             module: None,
+            constant_section: HashMap::new(),
         }
     }
 
@@ -311,16 +316,60 @@ impl Vm {
                 crate::vm::stack::MAX_REGISTERS
             )));
         }
+        self.constant_section.clear();
+        for (idx, constant) in module.constants.iter().enumerate() {
+            if let Constant::Bytes(bytes) = constant {
+                let len = bytes.len();
+                let ptr = self.memory.alloc(len);
+                unsafe {
+                    let dst = self.memory.as_mut_ptr().add(ptr);
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+                }
+                self.constant_section.insert(idx, ptr);
+            }
+        }
         self.module = Some(Rc::new(module));
         self.stack.push_entry(Rc::new(entry), entry_name);
 
         loop {
             match self.step() {
-                Ok(()) => {}
+                Ok(()) => {
+                    if self.memory.needs_gc() {
+                        let roots = self.collect_roots();
+                        self.memory.collect_gc(&roots);
+                    }
+                }
                 Err(VMError::Halted) => {
                     self.stack.pop_frame();
                     self.module = None;
                     return Ok(());
+                }
+                Err(VMError::Thrown(value)) => {
+                    if let Some(handler_pc) = self
+                        .stack
+                        .current()
+                        .and_then(|f| f.current_handler())
+                    {
+                        self.stack
+                            .current_mut()
+                            .ok_or(VMError::StackUnderflow)?
+                            .pc = handler_pc as usize;
+                        self.set_value(0, value)?;
+                        self.stack
+                            .current_mut()
+                            .ok_or(VMError::StackUnderflow)?
+                            .pop_handler();
+                        continue;
+                    } else {
+                        self.stack.pop_frame();
+                        if self.stack.is_empty() {
+                            return Err(VMError::Runtime {
+                                message: "uncaught exception".to_string(),
+                                backtrace: vec![],
+                            });
+                        }
+                        return Err(VMError::Thrown(value));
+                    }
                 }
                 Err(mut error) => {
                     if !matches!(&error, VMError::Runtime { .. }) {
@@ -378,19 +427,12 @@ impl Vm {
                     .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
                     .clone();
                 match constant {
-                    Constant::Bytes(bytes) => {
-                        let len = bytes.len();
-                        let ptr = self.memory.alloc(len);
-                        // SAFETY: dst was allocated with exactly bytes.len() bytes by
-                        // self.memory.alloc(len) above, and bytes.as_ptr() is valid
-                        // for len bytes. copy_nonoverlapping requires both pointers
-                        // are correctly aligned for u8 (they are) and that the regions
-                        // don't overlap (fresh allocation, so they don't).
-                        unsafe {
-                            let dst = self.memory.as_mut_ptr().add(ptr);
-                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
+                    Constant::Bytes(_bytes) => {
+                        if let Some(&ptr) = self.constant_section.get(&bx) {
+                            self.set_scalar(instr.a(), Register::from_ptr(ptr))?;
+                        } else {
+                            return Err(VMError::InvalidConstantIndex(instr.bx()));
                         }
-                        self.set_scalar(instr.a(), Register::from_ptr(ptr))?;
                     }
                     constant => self.set_scalar(
                         instr.a(),
@@ -611,31 +653,122 @@ impl Vm {
                 }
             }
 
+            Opcode::GETUPVAL => {
+                let closure_reg = instr.a();
+                let idx = instr.b() as usize;
+                let dest = instr.c();
+                let value = match self.value(closure_reg)? {
+                    VmValue::Closure { ref upvalues, .. } => {
+                        upvalues.get(idx).cloned()
+                    }
+                    _ => return Err(VMError::ExpectedFunction(closure_reg)),
+                }
+                .ok_or(VMError::InvalidRegister(idx as u8))?;
+                self.set_value(dest, value)?;
+            }
+            Opcode::SETUPVAL => {
+                let closure_reg = instr.a();
+                let idx = instr.b() as usize;
+                let src = instr.c();
+                let value = self.value(src)?;
+                let frame = self
+                    .stack
+                    .current_mut()
+                    .ok_or(VMError::StackUnderflow)?;
+                let slot = frame
+                    .get_mut(closure_reg)
+                    .ok_or(VMError::InvalidRegister(closure_reg))?;
+                match slot {
+                    VmValue::Closure { upvalues, .. } => {
+                        if idx >= upvalues.len() {
+                            return Err(VMError::InvalidRegister(idx as u8));
+                        }
+                        upvalues[idx] = value;
+                    }
+                    _ => return Err(VMError::ExpectedFunction(closure_reg)),
+                }
+            }
+
+            Opcode::TRY => {
+                let handler_pc = instr.bx() as u32;
+                self.stack
+                    .current_mut()
+                    .ok_or(VMError::StackUnderflow)?
+                    .push_handler(handler_pc);
+            }
+            Opcode::ENDTRY => {
+                self.stack
+                    .current_mut()
+                    .ok_or(VMError::StackUnderflow)?
+                    .pop_handler();
+            }
+            Opcode::THROW => {
+                let value = self.value(instr.a())?;
+                if let Some(handler_pc) = self
+                    .stack
+                    .current()
+                    .ok_or(VMError::StackUnderflow)?
+                    .current_handler()
+                {
+                    self.stack
+                        .current_mut()
+                        .ok_or(VMError::StackUnderflow)?
+                        .pc = handler_pc as usize;
+                    self.set_value(0, value)?;
+                    self.stack
+                        .current_mut()
+                        .ok_or(VMError::StackUnderflow)?
+                        .pop_handler();
+                } else {
+                    self.stack.pop_frame();
+                    if self.stack.is_empty() {
+                        return Err(VMError::Runtime {
+                            message: "uncaught exception".to_string(),
+                            backtrace: vec![],
+                        });
+                    }
+                    return Err(VMError::Thrown(value));
+                }
+            }
+
             Opcode::CLOSURE => {
-                let bx = if extended_bits != 0 {
+                let upvalue_count = instr.c() as usize;
+                let callable_idx = if extended_bits != 0 {
                     effective_bx as usize
                 } else {
-                    instr.bx() as usize
+                    instr.b() as usize
                 };
                 let closure = {
                     let module = self.module()?;
                     match module
                         .callables
-                        .get(bx)
-                        .ok_or(VMError::InvalidCallableIndex(instr.bx()))?
+                        .get(callable_idx)
+                        .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
                     {
                         Callable::Function(function_id) => {
                             let function = module
                                 .functions
                                 .get(*function_id as usize)
                                 .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
-                            VmValue::function(Rc::new(function.chunk.clone()))
+                            let mut upvalues = Vec::with_capacity(upvalue_count);
+                            let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
+                            let reg_count = frame.chunk.max_registers as usize;
+                            for i in 0..upvalue_count {
+                                let reg_idx = reg_count - upvalue_count + i;
+                                upvalues.push(
+                                    frame
+                                        .get(reg_idx as u8)
+                                        .ok_or(VMError::InvalidRegister(reg_idx as u8))?
+                                        .clone(),
+                                );
+                            }
+                            VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
                         }
                         Callable::Import(import_idx) => {
                             let import_decl = module
                                 .imports
                                 .get(*import_idx as usize)
-                                .ok_or(VMError::InvalidCallableIndex(instr.bx()))?;
+                                .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
                             let resolved = self
                                 .linker
                                 .resolve(import_decl)
@@ -723,6 +856,19 @@ impl Vm {
         }
     }
 
+    pub fn collect_roots(&self) -> Vec<usize> {
+        let mut roots = Vec::new();
+        for frame in self.stack.frames() {
+            roots.extend(frame.collect_roots());
+        }
+        roots
+    }
+
+    pub fn gc_alloc(&mut self, type_tag: u8, size: usize) -> usize {
+        let roots = self.collect_roots();
+        self.memory.alloc_gc(type_tag, size, &roots)
+    }
+
     fn fetch(&self) -> Result<Instruction, VMError> {
         let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
         frame
@@ -769,6 +915,20 @@ impl Vm {
             }
 
             self.stack.push_call(function.clone(), base, expected_returns, "anon");
+            for (index, value) in args.into_iter().enumerate() {
+                self.set_value(index as u8, value)?;
+            }
+            return Ok(());
+        }
+
+        if let Some((chunk, _)) = callable.as_closure() {
+            if arg_count as usize > chunk.max_registers as usize {
+                return Err(VMError::InvalidRegister(arg_count));
+            }
+
+            let chunk_clone = chunk.clone();
+            self.stack.push_call(chunk_clone, base, expected_returns, "anon");
+            self.set_value(arg_count, callable)?;
             for (index, value) in args.into_iter().enumerate() {
                 self.set_value(index as u8, value)?;
             }
@@ -897,7 +1057,7 @@ mod tests {
 
         let mut main = Chunk::new();
         main.max_registers = 4;
-        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
+        main.emit(Instruction::abc(Opcode::CLOSURE, 0, 0, 0));
         main.emit(Instruction::abx(Opcode::LOADK, 1, 0));
         main.emit(Instruction::abx(Opcode::LOADK, 2, 1));
         main.emit(Instruction::abc(Opcode::CALL, 0, 2, 1));
@@ -945,7 +1105,7 @@ mod tests {
 
         let mut main = Chunk::new();
         main.max_registers = 3;
-        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
+        main.emit(Instruction::abc(Opcode::CLOSURE, 0, 0, 0));
         main.emit(Instruction::abc(Opcode::CALL, 0, 0, 2));
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
@@ -984,13 +1144,13 @@ mod tests {
 
         let mut middle = Chunk::new();
         middle.max_registers = 1;
-        middle.emit(Instruction::abx(Opcode::CLOSURE, 0, 1));
+        middle.emit(Instruction::abc(Opcode::CLOSURE, 0, 1, 0));
         middle.emit(Instruction::abc(Opcode::CALL, 0, 0, 1));
         middle.emit(Instruction::abc(Opcode::RET, 0, 1, 0));
 
         let mut main = Chunk::new();
         main.max_registers = 1;
-        main.emit(Instruction::abx(Opcode::CLOSURE, 0, 0));
+        main.emit(Instruction::abc(Opcode::CLOSURE, 0, 0, 0));
         main.emit(Instruction::abc(Opcode::CALL, 0, 0, 1));
         main.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
 
@@ -1035,6 +1195,26 @@ mod tests {
     }
 
     #[test]
+    fn gc_collects_unreachable_objects() {
+        let mut vm = Vm::new(1024);
+
+        let obj1 = vm.gc_alloc(1, 16);
+        let obj2 = vm.gc_alloc(2, 32);
+        let obj3 = vm.gc_alloc(3, 64);
+
+        assert_eq!(vm.memory.gc_type_tag(obj1), 1);
+        assert_eq!(vm.memory.gc_type_tag(obj2), 2);
+        assert_eq!(vm.memory.gc_type_tag(obj3), 3);
+        assert_eq!(vm.memory.gc_allocations.len(), 3);
+
+        vm.memory.collect_gc(&[obj2]);
+
+        assert_eq!(vm.memory.gc_allocations.len(), 1);
+        assert_eq!(vm.memory.gc_free_list.len(), 2);
+        assert!(!vm.memory.gc_is_marked(obj2));
+    }
+
+    #[test]
     fn invalid_pc_register_and_memory_are_reported() {
         let mut empty = Chunk::new();
         empty.max_registers = 1;
@@ -1073,5 +1253,100 @@ mod tests {
             vm.step(),
             Err(VMError::MemoryOutOfBounds { pc: 2, addr: 4, size: 8 })
         );
+    }
+
+    #[test]
+    fn throw_and_catch_in_same_frame() {
+        let mut chunk = Chunk::new();
+        chunk.max_registers = 2;
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        chunk.emit(Instruction::abx(Opcode::TRY, 0, 5));
+        chunk.emit(Instruction::abc(Opcode::THROW, 0, 0, 0));
+        chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+        chunk.emit(Instruction::abc(Opcode::NOP, 0, 0, 0));
+        chunk.emit(Instruction::abc(Opcode::ENDTRY, 0, 0, 0));
+        chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = module_for(chunk);
+        module.constants.push(Constant::I64(42));
+
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+
+        vm.step().unwrap(); // LOADK r0, 42
+        vm.step().unwrap(); // TRY 5
+        vm.step().unwrap(); // THROW r0 — catches and jumps to handler at PC 5
+        // After THROW, register 0 should hold the thrown value
+        unsafe {
+            assert_eq!(vm.scalar(0).unwrap().i64, 42);
+        }
+        vm.step().unwrap(); // ENDTRY
+        assert_eq!(vm.step(), Err(VMError::Halted)); // HALT
+    }
+
+    #[test]
+    fn throw_without_handler_returns_error() {
+        let mut chunk = Chunk::new();
+        chunk.max_registers = 1;
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        chunk.emit(Instruction::abc(Opcode::THROW, 0, 0, 0));
+
+        let mut module = module_for(chunk);
+        module.constants.push(Constant::I64(99));
+
+        let result = run_module(module);
+        assert!(result.is_err());
+        match result {
+            Err(VMError::Runtime { message, .. }) => {
+                assert!(message.contains("uncaught exception"));
+            }
+            _ => panic!("expected Runtime error"),
+        }
+    }
+
+    #[test]
+    fn closure_captures_upvalue_and_returns_it() {
+        let mut inner = Chunk::new();
+        inner.max_registers = 2;
+        inner.emit(Instruction::abc(Opcode::GETUPVAL, 0, 0, 0));
+        inner.emit(Instruction::abc(Opcode::RET, 0, 1, 0));
+
+        let mut outer = Chunk::new();
+        outer.max_registers = 3;
+        outer.emit(Instruction::abx(Opcode::LOADK, 2, 0));
+        outer.emit(Instruction::abc(Opcode::CLOSURE, 1, 0, 1));
+        outer.emit(Instruction::abc(Opcode::CALL, 1, 0, 1));
+        outer.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = Module::new("test");
+        module.entry = Some(0);
+        module.constants = vec![Constant::I64(77)];
+        module.callables = vec![Callable::Function(1)];
+        module.functions.push(Function {
+            name: "outer".to_string(),
+            chunk: outer,
+        });
+        module.functions.push(Function {
+            name: "inner".to_string(),
+            chunk: inner,
+        });
+
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+        loop {
+            match vm.step() {
+                Ok(()) => {}
+                Err(VMError::Halted) => break,
+                Err(error) => panic!("unexpected error: {error:?}"),
+            }
+        }
+
+        unsafe {
+            assert_eq!(vm.scalar(1).unwrap().i64, 77);
+        }
     }
 }

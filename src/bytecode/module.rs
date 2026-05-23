@@ -170,12 +170,13 @@ pub fn link_modules(
                     *instr = Instruction::abx(Opcode::LOADK, instr.a(), adjusted as u16);
                 }
                 Opcode::CLOSURE => {
-                    let bx = instr.bx() as usize;
-                    if bx < our_callable_count {
-                        *instr = Instruction::abx(
+                    let b = instr.b() as usize;
+                    if b < our_callable_count {
+                        *instr = Instruction::abc(
                             Opcode::CLOSURE,
                             instr.a(),
-                            (bx + callable_offset) as u16,
+                            (b + callable_offset) as u8,
+                            instr.c(),
                         );
                     }
                 }

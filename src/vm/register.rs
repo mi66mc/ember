@@ -97,17 +97,26 @@ impl Default for Register {
     }
 }
 
+impl PartialEq for Register {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { self.bits == other.bits }
+    }
+}
+
+impl Eq for Register {}
+
 impl std::fmt::Debug for Register {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Register(0x{:016x})", unsafe { self.bits })
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VmValue {
     Scalar(Register),
     Function(Rc<Chunk>),
     NativeImport(ImportIndex),
+    Closure { chunk: Rc<Chunk>, upvalues: Vec<VmValue> },
 }
 
 impl VmValue {
@@ -123,6 +132,10 @@ impl VmValue {
         VmValue::NativeImport(index)
     }
 
+    pub fn closure(chunk: Rc<Chunk>, upvalues: Vec<VmValue>) -> Self {
+        VmValue::Closure { chunk, upvalues }
+    }
+
     pub fn zero() -> Self {
         VmValue::Scalar(Register::zero())
     }
@@ -130,13 +143,13 @@ impl VmValue {
     pub fn as_scalar(&self) -> Option<Register> {
         match self {
             VmValue::Scalar(register) => Some(*register),
-            VmValue::Function(_) | VmValue::NativeImport(_) => None,
+            VmValue::Function(_) | VmValue::NativeImport(_) | VmValue::Closure { .. } => None,
         }
     }
 
     pub fn as_function(&self) -> Option<Rc<Chunk>> {
         match self {
-            VmValue::Scalar(_) | VmValue::NativeImport(_) => None,
+            VmValue::Scalar(_) | VmValue::NativeImport(_) | VmValue::Closure { .. } => None,
             VmValue::Function(chunk) => Some(chunk.clone()),
         }
     }
@@ -144,7 +157,14 @@ impl VmValue {
     pub fn as_native_import(&self) -> Option<ImportIndex> {
         match self {
             VmValue::NativeImport(index) => Some(*index),
-            VmValue::Scalar(_) | VmValue::Function(_) => None,
+            VmValue::Scalar(_) | VmValue::Function(_) | VmValue::Closure { .. } => None,
+        }
+    }
+
+    pub fn as_closure(&self) -> Option<(&Rc<Chunk>, &[VmValue])> {
+        match self {
+            VmValue::Closure { chunk, upvalues } => Some((chunk, upvalues)),
+            _ => None,
         }
     }
 }
