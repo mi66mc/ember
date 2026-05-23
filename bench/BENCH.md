@@ -7,9 +7,9 @@ All tests run on the same machine (Windows, PowerShell `Measure-Command`).
 
 | Runtime | Command |
 |---------|---------|
-| Ember `.embt` (parse + run) | `ember run examples/bench/main.embt` |
-| Ember `.emb` (decode + run) | `ember build -o bench.emb && ember run bench.emb` |
-| CPython 3.x | `python bench.py` |
+| Ember `.embt` (parse + run) | `ember run bench/bench.embt` |
+| Ember `.emb` (decode + run) | `ember build bench/bench.embt -o bench/bench.emb && ember run bench/bench.emb` |
+| CPython 3.x | `python bench/bench.py` |
 
 ## Algorithm
 
@@ -36,7 +36,7 @@ Ember compiled to `.emb` is slightly faster than CPython on this pure arithmetic
 
 ## Bytecode
 
-The Ember program for this benchmark (`examples/bench/main.embt`):
+The Ember program for this benchmark (`bench/bench.embt`):
 
 ```embt
 .module "bench"
