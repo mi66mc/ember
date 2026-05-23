@@ -443,36 +443,22 @@ fn validate_instruction(
         }
         Opcode::HALT | Opcode::NOP | Opcode::JMP | Opcode::EXT => {}
         Opcode::JMPIF | Opcode::JMPIFNOT => check_reg(instr.a())?,
-        Opcode::LOAD_I8
-        | Opcode::LOAD_I16
-        | Opcode::LOAD_I32
-        | Opcode::LOAD_I64
-        | Opcode::LOAD_U8
-        | Opcode::LOAD_U16
-        | Opcode::LOAD_U32
-        | Opcode::LOAD_U64
-        | Opcode::LOAD_F32
-        | Opcode::LOAD_F64 => {
-            check_reg(instr.a())?;
-            check_reg(instr.b())?;
-        }
-        Opcode::STORE_I8
-        | Opcode::STORE_I16
-        | Opcode::STORE_I32
-        | Opcode::STORE_I64
-        | Opcode::STORE_U8
-        | Opcode::STORE_U16
-        | Opcode::STORE_U32
-        | Opcode::STORE_U64
-        | Opcode::STORE_F32
-        | Opcode::STORE_F64 => {
-            check_reg(instr.a())?;
-            check_reg(instr.c())?;
-        }
         _ => {
-            check_reg(instr.a())?;
-            check_reg(instr.b())?;
-            check_reg(instr.c())?;
+            match instruction_format(instr.opcode()) {
+                InstrFormat::RRR => {
+                    check_reg(instr.a())?;
+                    check_reg(instr.b())?;
+                    check_reg(instr.c())?;
+                }
+                InstrFormat::RIR => {
+                    check_reg(instr.a())?;
+                    check_reg(instr.c())?;
+                }
+                InstrFormat::RRI => {
+                    check_reg(instr.a())?;
+                    check_reg(instr.b())?;
+                }
+            }
         }
     }
     Ok(())
