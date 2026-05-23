@@ -208,6 +208,8 @@ opcodes! {
 
     SETUPVAL = 0xDA,
 
+    CALLTAIL = 0xDB,
+
     GETG = 0xE0,
     SETG = 0xE1,
 

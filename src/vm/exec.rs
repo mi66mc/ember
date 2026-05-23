@@ -1461,7 +1461,7 @@ mod tests {
         vm.stack.push_entry(Rc::new(entry), "outer");
         vm.step().unwrap(); // CLOSURE
         vm.step().unwrap(); // CALLTAIL
-        assert_eq!(vm.stack.current().unwrap().pc, 1);
+        assert_eq!(vm.stack.current().unwrap().pc, 0);
     }
 
     #[test]

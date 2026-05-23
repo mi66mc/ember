@@ -244,7 +244,7 @@ fn is_instruction(tokens: &[String]) -> bool {
         "halt" | "nop" | "ext"
             | "loadk" | "loadkx"
             | "closure" | "closurex"
-            | "call"
+            | "call" | "calltail"
             | "ret"
             | "jmp" | "jmpx"
             | "jmpif" | "jmpifnot"
@@ -362,6 +362,7 @@ pub fn format_instruction(instr: &Instruction) -> String {
         Opcode::MOVE => format!("move r{}, r{}", instr.a(), instr.b()),
         Opcode::CLOSURE => format!("closure r{}, {}, {}", instr.a(), instr.b(), instr.c()),
         Opcode::CALL => format!("call r{}, {}, {}", instr.a(), instr.b(), instr.c()),
+        Opcode::CALLTAIL => format!("calltail r{}, {}", instr.a(), instr.b()),
         Opcode::RET => format!("ret r{}, {}", instr.a(), instr.b()),
         Opcode::JMP => format!("jmp {}", instr.sbx_ab()),
         Opcode::JMPIF => format!("jmpif r{}, {}", instr.a(), instr.sbx()),
@@ -431,7 +432,7 @@ fn validate_instruction(
                 ));
             }
         }
-        Opcode::CALL => {
+        Opcode::CALL | Opcode::CALLTAIL => {
             check_reg(instr.a())?;
             let last = instr.a() as usize + instr.b() as usize;
             if last >= reg_count {
@@ -883,6 +884,15 @@ fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Vec<Instructio
                 parse_reg(&tokens[1], line_no)?,
                 parse_u8(&tokens[2], line_no)?,
                 parse_u8(&tokens[3], line_no)?,
+            )]
+        }
+        "calltail" => {
+            expect_len(tokens, 3, line_no)?;
+            vec![Instruction::abc(
+                Opcode::CALLTAIL,
+                parse_reg(&tokens[1], line_no)?,
+                parse_u8(&tokens[2], line_no)?,
+                0,
             )]
         }
         "getupval" => {
