@@ -1,0 +1,49 @@
+.module "tailfib"
+.entry 0
+
+.import
+  io.print_i64
+
+;; Computes fib(10) = 55 using tail recursion via CALLTAIL.
+;; CALLTAIL reuses the current frame — stack never grows.
+
+.constants
+  0 i64 10
+  1 i64 0
+  2 i64 1
+  3 i64 1
+
+.callables
+  0 function 1
+  1 io.print_i64
+
+.functions
+  0 "main" regs=4
+    loadk r1, 0             ;; r1 = 10 (n)
+    loadk r2, 1             ;; r2 = 0 (a)
+    loadk r3, 2             ;; r3 = 1 (b)
+
+    closure r0, 0, 0        ;; r0 = tail_fib
+    call r0, 3, 1           ;; callee: r0=n, r1=a, r2=b, r3=fn_ref
+
+    closure r1, 1, 0        ;; print_i64
+    move r2, r0             ;; r2 = result
+    call r1, 1, 0           ;; print 55
+    halt
+  end
+
+  ;; tail_fib(n, a, b):
+  ;;   r0=n, r1=a, r2=b, r3=function reference
+  ;;   Returns fib(original_n)
+  1 "tail_fib" regs=7
+    jmpif r0, @recurse      ;; if n > 0
+    ret r1, 1               ;; return a
+
+    @recurse:
+    loadk r4, 3             ;; r4 = 1
+    sub.i64 r4, r0, r4      ;; r4 = n - 1
+    move r5, r2             ;; r5 = b  (new a)
+    add.i64 r6, r1, r2      ;; r6 = a+b (new b)
+
+    calltail r3, 3          ;; tail_fib(n-1, b, a+b)
+  end

@@ -687,12 +687,12 @@ impl Vm {
             }
 
             Opcode::GETUPVAL => {
-                let closure_reg = instr.a();
+                let dest = instr.a();
                 let idx = instr.b() as usize;
-                let dest = instr.c();
+                let closure_reg = instr.c();
                 let value = match self.value(closure_reg)? {
                     VmValue::Closure { ref upvalues, .. } => {
-                        upvalues.get(idx).cloned()
+                        upvalues.borrow().get(idx).cloned()
                     }
                     _ => return Err(VMError::ExpectedFunction(closure_reg)),
                 }
@@ -700,9 +700,9 @@ impl Vm {
                 self.set_value(dest, value)?;
             }
             Opcode::SETUPVAL => {
-                let closure_reg = instr.a();
+                let src = instr.a();
                 let idx = instr.b() as usize;
-                let src = instr.c();
+                let closure_reg = instr.c();
                 let value = self.value(src)?;
                 let frame = self
                     .stack
@@ -713,21 +713,24 @@ impl Vm {
                     .ok_or(VMError::InvalidRegister(closure_reg))?;
                 match slot {
                     VmValue::Closure { upvalues, .. } => {
-                        if idx >= upvalues.len() {
+                        if idx >= upvalues.borrow().len() {
                             return Err(VMError::InvalidRegister(idx as u8));
                         }
-                        upvalues[idx] = value;
+                        upvalues.borrow_mut()[idx] = value;
                     }
                     _ => return Err(VMError::ExpectedFunction(closure_reg)),
                 }
             }
 
             Opcode::TRY => {
-                let handler_pc = instr.bx() as u32;
+                let offset = instr.bx() as i16 as isize;
+                let handler_pc = self.stack.current()
+                    .ok_or(VMError::StackUnderflow)?
+                    .pc.wrapping_sub(1).wrapping_add(offset as usize);
                 self.stack
                     .current_mut()
                     .ok_or(VMError::StackUnderflow)?
-                    .push_handler(handler_pc);
+                    .push_handler(handler_pc as u32);
             }
             Opcode::ENDTRY => {
                 self.stack
@@ -837,6 +840,8 @@ impl Vm {
                     for (i, arg) in args.into_iter().enumerate() {
                         frame.set(i as u8, arg);
                     }
+                    // Store function reference for nested CALLTAIL
+                    frame.set(arg_count, callable);
                 } else if let Some(idx) = callable.as_native_import() {
                     let returns = self
                         .linker
@@ -997,6 +1002,7 @@ impl Vm {
             for (index, value) in args.into_iter().enumerate() {
                 self.set_value(index as u8, value)?;
             }
+            self.set_value(arg_count, callable)?;
             return Ok(());
         }
 
@@ -1339,7 +1345,7 @@ mod tests {
         let mut chunk = Chunk::new();
         chunk.max_registers = 2;
         chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
-        chunk.emit(Instruction::abx(Opcode::TRY, 0, 5));
+        chunk.emit(Instruction::abx(Opcode::TRY, 0, 4));  // handler at PC 5, TRY at PC 1, offset = 4
         chunk.emit(Instruction::abc(Opcode::THROW, 0, 0, 0));
         chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
         chunk.emit(Instruction::abc(Opcode::NOP, 0, 0, 0));

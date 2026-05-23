@@ -1,0 +1,64 @@
+.module "counter"
+.entry 0
+
+.import
+  io.print_i64
+
+;; Creates a closure that remembers a counter.
+;; Each call increments and returns the value: 1, 2, 3.
+;;
+;;   counter = make_counter()
+;;   counter() → 1
+;;   counter() → 2
+;;   counter() → 3
+
+.constants
+  0 i64 0
+  1 i64 1
+  2 i64 3
+
+.callables
+  0 function 1           ;; make_counter
+  1 function 2           ;; increment (closure body)
+  2 io.print_i64
+
+.functions
+  0 "main" regs=5
+    ;; Step 1: create the closure
+    closure r4, 0, 0      ;; r4 = make_counter
+    call r4, 0, 1         ;; r4 = closure(count=0)
+
+    loadk r3, 2           ;; r3 = 3 (loop count)
+
+    @loop:
+    ;; Save closure, call it, get result in a separate register
+    move r2, r4           ;; r2 = closure (keep r4 as copy)
+    call r2, 0, 1         ;; r2 = new count (returns to r2)
+
+    ;; Print result
+    closure r1, 2, 0      ;; r1 = print_i64
+    call r1, 1, 0         ;; print(r2)
+
+    ;; Decrement loop counter
+    loadk r1, 1
+    sub.i64 r3, r3, r1
+    jmpif r3, @loop
+
+    halt
+  end
+
+  ;; make_counter() → closure
+  1 "make_counter" regs=3
+    loadk r1, 0           ;; r1 = 0 (initial value)
+    closure r0, 1, 1      ;; r0 = closure(increment, upvalue=[r1=0])
+    ret r0, 1
+  end
+
+  ;; increment() → count+1
+  2 "increment" regs=3
+    loadk r2, 1           ;; r2 = 1 (step)
+    getupval r1, 0, r0    ;; r1 = upvalue[0]
+    add.i64 r1, r1, r2    ;; count++
+    setupval r1, 0, r0    ;; save back
+    ret r1, 1
+  end

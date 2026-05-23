@@ -23,6 +23,7 @@
 //    last written, because the union is exactly 64 bits wide and `u64` is
 //    valid for every possible bit pattern.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
@@ -116,7 +117,7 @@ pub enum VmValue {
     Scalar(Register),
     Function(Rc<Chunk>),
     NativeImport(ImportIndex),
-    Closure { chunk: Rc<Chunk>, upvalues: Vec<VmValue> },
+    Closure { chunk: Rc<Chunk>, upvalues: Rc<RefCell<Vec<VmValue>>> },
 }
 
 impl VmValue {
@@ -133,7 +134,7 @@ impl VmValue {
     }
 
     pub fn closure(chunk: Rc<Chunk>, upvalues: Vec<VmValue>) -> Self {
-        VmValue::Closure { chunk, upvalues }
+        VmValue::Closure { chunk, upvalues: Rc::new(RefCell::new(upvalues)) }
     }
 
     pub fn zero() -> Self {
@@ -161,7 +162,7 @@ impl VmValue {
         }
     }
 
-    pub fn as_closure(&self) -> Option<(&Rc<Chunk>, &[VmValue])> {
+    pub fn as_closure(&self) -> Option<(&Rc<Chunk>, &Rc<RefCell<Vec<VmValue>>>)> {
         match self {
             VmValue::Closure { chunk, upvalues } => Some((chunk, upvalues)),
             _ => None,

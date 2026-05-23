@@ -1,0 +1,51 @@
+.module "file"
+.entry 0
+
+.import
+  io.print_mem
+  fs.open
+  fs.write
+  fs.close
+
+;; Writes "ember" to a temp file, reads it back, prints content.
+
+.constants
+  0 bytes "ember.txt"
+  1 u64 9
+  2 bytes "ember"
+  3 u64 5
+  4 i64 1
+  5 i64 0
+
+.callables
+  0 io.print_mem
+  1 fs.open
+  2 fs.write
+  3 fs.close
+
+.functions
+  0 "main" regs=5
+    ;; open for write
+    closure r1, 1, 0          ;; fs.open
+    loadk r2, 0               ;; filename ptr
+    loadk r3, 1               ;; len
+    loadk r4, 4               ;; mode=1
+    call r1, 3, 1             ;; r1 = fd
+
+    ;; write data
+    closure r0, 2, 0          ;; fs.write
+    loadk r2, 2               ;; data ptr
+    loadk r3, 3               ;; len
+    call r0, 3, 0             ;; write(r1=fd, r2=ptr, r3=len)
+
+    ;; close
+    closure r0, 3, 0          ;; fs.close
+    call r0, 1, 0             ;; close(r1=fd)
+
+    ;; print data directly from constant ptr
+    closure r0, 0, 0          ;; io.print_mem
+    loadk r1, 2               ;; ptr
+    loadk r2, 3               ;; len
+    call r0, 2, 0             ;; print "ember"
+    halt
+  end

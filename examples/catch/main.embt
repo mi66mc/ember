@@ -1,0 +1,68 @@
+.module "catch"
+.entry 0
+
+.import
+  io.print_i64
+
+;; Demonstrates TRY/ENDTRY/THROW.
+;; safe_divide checks for zero divisor and THROWs on error.
+;; The caller catches the throw and uses a fallback value.
+
+.constants
+  0 i64 10
+  1 i64 0
+  2 i64 -1
+  3 i64 2
+  4 i64 5
+
+.callables
+  0 function 1
+  1 io.print_i64
+
+.functions
+  0 "main" regs=5
+    ;; Test 1: 10 / 0 → caught, returns -1
+    loadk r1, 0               ;; r1 = 10
+    loadk r2, 1               ;; r2 = 0
+    loadk r3, 2               ;; r3 = -1 (fallback)
+
+    closure r0, 0, 0          ;; r0 = safe_divide
+    call r0, 3, 1             ;; r0 = safe_divide(10, 0, -1)
+    move r4, r0
+
+    closure r1, 1, 0          ;; print_i64
+    move r2, r4
+    call r1, 1, 0             ;; print -1
+
+    ;; Test 2: 10 / 2 → 5
+    loadk r1, 0               ;; r1 = 10
+    loadk r2, 3               ;; r2 = 2
+    loadk r3, 2               ;; r3 = -1 (fallback, not used)
+
+    closure r0, 0, 0          ;; safe_divide
+    call r0, 3, 1             ;; r0 = safe_divide(10, 2, -1)
+    move r4, r0
+
+    closure r1, 1, 0          ;; print_i64
+    move r2, r4
+    call r1, 1, 0             ;; print 5
+
+    halt
+  end
+
+  ;; safe_divide(a, b, fallback): returns a/b or fallback if b==0
+  ;; CALLEE: r0=a, r1=b, r2=fallback
+  1 "safe_divide" regs=5
+    try @on_error             ;; catch any throw or panic
+
+    jmpif r1, @do_divide      ;; if b != 0
+    throw r2                  ;; b==0: throw fallback
+
+    @do_divide:
+    div.i64 r3, r0, r1        ;; r3 = a / b
+    ret r3, 1                 ;; success
+
+    @on_error:
+    endtry
+    ret r2, 1                 ;; return fallback
+  end
