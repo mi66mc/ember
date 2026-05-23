@@ -119,12 +119,12 @@ fn scalar_arg(args: &[VmValue], name: &str) -> Result<Register, NativeError> {
 
 #[inline(always)]
 unsafe fn scalar_arg_unchecked(args: &[VmValue]) -> Register {
-    args.get_unchecked(0).as_scalar().unwrap_unchecked()
+    unsafe { args.get_unchecked(0).as_scalar().unwrap_unchecked() }
 }
 
 #[inline(always)]
 unsafe fn scalar_arg_at_unchecked(args: &[VmValue], idx: usize) -> Register {
-    args.get_unchecked(idx).as_scalar().unwrap_unchecked()
+    unsafe { args.get_unchecked(idx).as_scalar().unwrap_unchecked() }
 }
 
 fn print_i64(args: &[VmValue]) -> NativeResult {
