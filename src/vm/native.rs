@@ -310,25 +310,25 @@ fn memset(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     Ok(Vec::new())
 }
 
-fn gc_alloc(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn alloc_managed(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     if args.len() < 2 {
         return Err(NativeError::new(
-            "core.gc_alloc expects 2 arguments (type_tag, size)",
+            "core.alloc_managed expects 2 arguments (type_tag, size)",
         ));
     }
     let type_tag = unsafe {
         args[0]
             .as_scalar()
-            .ok_or_else(|| NativeError::new("core.gc_alloc: type_tag must be scalar"))?
+            .ok_or_else(|| NativeError::new("core.alloc_managed: type_tag must be scalar"))?
             .u8
     };
     let size = unsafe {
         args[1]
             .as_scalar()
-            .ok_or_else(|| NativeError::new("core.gc_alloc: size must be scalar"))?
+            .ok_or_else(|| NativeError::new("core.alloc_managed: size must be scalar"))?
             .u64 as usize
     };
-    let ptr = memory.alloc_gc(type_tag, size, &[]);
+    let ptr = memory.alloc_managed(type_tag, size, &[]);
     Ok(vec![VmValue::scalar(Register::from_ptr(ptr))])
 }
 
@@ -358,7 +358,7 @@ impl NativeModule for Core {
             0 => alloc(args, memory),
             1 => memcpy(args, memory),
             2 => memset(args, memory),
-            3 => gc_alloc(args, memory),
+            3 => alloc_managed(args, memory),
             4 => gc_collect(args, memory),
             _ => Err(NativeError::new(format!(
                 "core: unknown function {index}"
@@ -371,7 +371,7 @@ impl NativeModule for Core {
             "alloc" => Some(0),
             "memcpy" => Some(1),
             "memset" => Some(2),
-            "gc_alloc" => Some(3),
+            "alloc_managed" => Some(3),
             "gc_collect" => Some(4),
             _ => None,
         }

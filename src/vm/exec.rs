@@ -864,9 +864,9 @@ impl Vm {
         roots
     }
 
-    pub fn gc_alloc(&mut self, type_tag: u8, size: usize) -> usize {
+    pub fn alloc_managed(&mut self, type_tag: u8, size: usize) -> usize {
         let roots = self.collect_roots();
-        self.memory.alloc_gc(type_tag, size, &roots)
+        self.memory.alloc_managed(type_tag, size, &roots)
     }
 
     fn fetch(&self) -> Result<Instruction, VMError> {
@@ -1198,20 +1198,20 @@ mod tests {
     fn gc_collects_unreachable_objects() {
         let mut vm = Vm::new(1024);
 
-        let obj1 = vm.gc_alloc(1, 16);
-        let obj2 = vm.gc_alloc(2, 32);
-        let obj3 = vm.gc_alloc(3, 64);
+        let obj1 = vm.alloc_managed(1, 16);
+        let obj2 = vm.alloc_managed(2, 32);
+        let obj3 = vm.alloc_managed(3, 64);
 
-        assert_eq!(vm.memory.gc_type_tag(obj1), 1);
-        assert_eq!(vm.memory.gc_type_tag(obj2), 2);
-        assert_eq!(vm.memory.gc_type_tag(obj3), 3);
+        assert_eq!(vm.memory.managed_type_tag(obj1), 1);
+        assert_eq!(vm.memory.managed_type_tag(obj2), 2);
+        assert_eq!(vm.memory.managed_type_tag(obj3), 3);
         assert_eq!(vm.memory.gc_allocations.len(), 3);
 
         vm.memory.collect_gc(&[obj2]);
 
         assert_eq!(vm.memory.gc_allocations.len(), 1);
-        assert_eq!(vm.memory.gc_free_list.len(), 2);
-        assert!(!vm.memory.gc_is_marked(obj2));
+        assert_eq!(vm.memory.free_list.len(), 2);
+        assert!(!vm.memory.managed_is_marked(obj2));
     }
 
     #[test]

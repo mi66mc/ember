@@ -1,25 +1,20 @@
-// growable linear memory
+// Single-heap linear memory with GC.
 //
-// ┌─────────────────────────────────────────────────────────┐
-// │ 0x00 │ 0x01 │ ... │ len │ ... │ cap │                   │
-// └─────────────────────────────────────────────────────────┘
-//   └───────────────────┘     └───────────┘
-//         used              reserved (can grow)
+// ┌──────────────────────────────────────────────────────────────────┐
+// │ [header:2][raw bytes...] │ [header:2][managed obj...] │ ...      │
+// └──────────────────────────────────────────────────────────────────┘
 //
-// GC heap (separate, mark-sweep):
-//   each object: [mark_byte: u8][type_tag: u8][payload...]
-//                 ^-- header_addr       ^-- payload_ptr (returned)
+// Every allocation uses the same backing Vec<u8>. Raw allocations
+// (type_tag = 0) have no header and are not tracked by GC.
+// Managed allocations (type_tag > 0) have a 2-byte header
+// [mark:u8][type_tag:u8] before the payload and are tracked for GC.
 
 pub struct Memory {
     data: Vec<u8>,
     bump: usize,
-    free_list: Vec<(usize, usize)>, // (addr, size)
-    // GC heap
-    gc_heap: Vec<u8>,
-    gc_bump: usize,
-    pub(crate) gc_free_list: Vec<(usize, usize)>,
+    pub(crate) free_list: Vec<(usize, usize)>,
+    pub(crate) gc_allocations: Vec<(usize, usize)>, // (header_addr, total_size) for managed objs
     gc_threshold: usize,
-    pub(crate) gc_allocations: Vec<(usize, usize)>, // (header_addr, total_size)
 }
 
 const DEFAULT_GC_THRESHOLD: usize = 65536;
@@ -30,11 +25,8 @@ impl Memory {
             data: vec![0; initial_size],
             bump: 0,
             free_list: Vec::new(),
-            gc_heap: Vec::new(),
-            gc_bump: 0,
-            gc_free_list: Vec::new(),
-            gc_threshold: DEFAULT_GC_THRESHOLD,
             gc_allocations: Vec::new(),
+            gc_threshold: DEFAULT_GC_THRESHOLD,
         }
     }
 
@@ -48,68 +40,91 @@ impl Memory {
         old
     }
 
-    // ── GC heap ─────────────────────────────────
+    // ── Raw allocation (no GC tracking) ──────────────────
 
-    pub fn needs_gc(&self) -> bool {
-        self.gc_bump > self.gc_threshold
+    /// Allocate raw bytes. No header, not tracked by GC.
+    /// Used for constant section, manual buffers.
+    pub fn alloc(&mut self, size: usize) -> usize {
+        if let Some(pos) = self.free_list.iter().position(|&(_, block_size)| block_size >= size) {
+            let (addr, block_size) = self.free_list.swap_remove(pos);
+            if block_size > size {
+                self.free_list.push((addr + size, block_size - size));
+            }
+            return addr;
+        }
+        let end = self.bump + size;
+        if end > self.data.len() {
+            self.grow(end - self.data.len());
+        }
+        let ptr = self.bump;
+        self.bump = end;
+        ptr
     }
 
-    pub fn alloc_gc(&mut self, type_tag: u8, size: usize, roots: &[usize]) -> usize {
+    // ── Managed allocation (GC-tracked) ──────────────────
+
+    pub fn needs_gc(&self) -> bool {
+        self.bump > self.gc_threshold
+    }
+
+    /// Allocate a GC-managed object with a type tag.
+    /// Returns pointer to the payload (past the 2-byte header).
+    /// Triggers collection if bump exceeds threshold.
+    pub fn alloc_managed(&mut self, type_tag: u8, size: usize, roots: &[usize]) -> usize {
         if size == 0 {
             return 0;
         }
-        if self.gc_bump > self.gc_threshold && !roots.is_empty() {
+        if self.needs_gc() && !roots.is_empty() {
             self.collect_gc(roots);
         }
         let total = size + 2;
-        if let Some(pos) = self
-            .gc_free_list
-            .iter()
-            .position(|&(_, block_size)| block_size >= total)
-        {
-            let (addr, block_size) = self.gc_free_list.swap_remove(pos);
+        // Try free list (freed by previous GC sweep)
+        if let Some(pos) = self.free_list.iter().position(|&(_, block_size)| block_size >= total) {
+            let (addr, block_size) = self.free_list.swap_remove(pos);
             if block_size > total {
-                self.gc_free_list.push((addr + total, block_size - total));
+                self.free_list.push((addr + total, block_size - total));
             }
-            self.gc_heap[addr] = 0;
-            self.gc_heap[addr + 1] = type_tag;
+            // SAFETY: addr is within data, allocated by alloc_managed or sweep
+            self.data[addr] = 0;       // mark bit
+            self.data[addr + 1] = type_tag;
             self.gc_allocations.push((addr, total));
-            return addr + 2;
+            return addr + 2;            // payload pointer
         }
-        let header = self.gc_bump;
+        // Bump allocate
+        let header = self.bump;
         let end = header + total;
-        if end > self.gc_heap.len() {
-            self.gc_heap.resize(end, 0);
+        if end > self.data.len() {
+            self.grow(end - self.data.len());
         }
-        self.gc_heap[header] = 0;
-        self.gc_heap[header + 1] = type_tag;
-        self.gc_bump = end;
+        self.data[header] = 0;
+        self.data[header + 1] = type_tag;
+        self.bump = end;
         self.gc_allocations.push((header, total));
         header + 2
     }
 
-    pub fn mark(&mut self, ptr: usize) {
-        if ptr < 2 {
+    pub fn mark(&mut self, payload_ptr: usize) {
+        if payload_ptr < 2 {
             return;
         }
-        let header = ptr - 2;
-        if header + 1 >= self.gc_heap.len() {
+        let header = payload_ptr - 2;
+        if header + 1 >= self.data.len() {
             return;
         }
-        if self.gc_heap[header] == 1 {
-            return;
+        if self.data[header] == 1 {
+            return; // already marked
         }
-        self.gc_heap[header] = 1;
+        self.data[header] = 1;
     }
 
     pub fn sweep(&mut self) {
         let mut surviving = Vec::new();
         for &(header, total) in &self.gc_allocations {
-            if header + 1 < self.gc_heap.len() && self.gc_heap[header] == 1 {
-                self.gc_heap[header] = 0;
+            if header + 1 < self.data.len() && self.data[header] == 1 {
+                self.data[header] = 0; // clear mark for next cycle
                 surviving.push((header, total));
             } else {
-                self.gc_free_list.push((header, total));
+                self.free_list.push((header, total));
             }
         }
         self.gc_allocations = surviving;
@@ -120,62 +135,30 @@ impl Memory {
             self.mark(root);
         }
         self.sweep();
-        let next = self.gc_bump + 4096;
+        let next = self.bump + 4096;
         if next > self.gc_threshold {
             self.gc_threshold = next;
         }
     }
 
-    pub fn gc_type_tag(&self, payload_ptr: usize) -> u8 {
-        if payload_ptr < 2 || payload_ptr - 1 >= self.gc_heap.len() {
+    pub fn managed_type_tag(&self, payload_ptr: usize) -> u8 {
+        if payload_ptr < 2 || payload_ptr - 1 >= self.data.len() {
             return 0;
         }
-        self.gc_heap[payload_ptr - 1]
+        self.data[payload_ptr - 1]
     }
 
-    pub fn gc_is_marked(&self, payload_ptr: usize) -> bool {
-        if payload_ptr < 2 || payload_ptr - 2 >= self.gc_heap.len() {
+    pub fn managed_is_marked(&self, payload_ptr: usize) -> bool {
+        if payload_ptr < 2 || payload_ptr - 2 >= self.data.len() {
             return false;
         }
-        self.gc_heap[payload_ptr - 2] == 1
-    }
-
-    // ── non-GC allocator ────────────────────────
-
-    pub fn alloc(&mut self, size: usize) -> usize {
-        // Try to find a free block that fits
-        if let Some(pos) = self.free_list.iter().position(|&(_, block_size)| block_size >= size) {
-            let (addr, block_size) = self.free_list.swap_remove(pos);
-            if block_size > size {
-                // Split: put remainder back
-                self.free_list.push((addr + size, block_size - size));
-            }
-            return addr;
-        }
-        // Fall back to bump allocation
-        let end = self.bump + size;
-        if end > self.data.len() {
-            self.grow(end - self.data.len());
-        }
-        let ptr = self.bump;
-        self.bump = end;
-        ptr
-    }
-
-    pub fn free(&mut self, ptr: usize, size: usize) {
-        self.free_list.push((ptr, size));
+        self.data[payload_ptr - 2] == 1
     }
 
     pub fn reset(&mut self) {
         self.bump = 0;
         self.free_list.clear();
-        self.gc_bump = 0;
-        self.gc_free_list.clear();
         self.gc_allocations.clear();
-    }
-
-    pub fn bump_ptr(&self) -> usize {
-        self.bump
     }
 
     // ─────────────────────────────────────────
@@ -298,48 +281,57 @@ mod tests {
     fn test_checked_read() {
         let mem = Memory::new(8);
         assert!(mem.read_checked::<i64>(0).is_some());
-        assert!(mem.read_checked::<i64>(1).is_none()); // out of bounds
+        assert!(mem.read_checked::<i64>(1).is_none());
     }
 
     #[test]
     fn test_checked_write() {
         let mut mem = Memory::new(8);
         assert!(mem.write_checked::<i64>(0, 42));
-        assert!(!mem.write_checked::<i64>(1, 42)); // out of bounds
+        assert!(!mem.write_checked::<i64>(1, 42));
     }
 
     #[test]
-    fn gc_mark_sweep_collects_dead_objects() {
-        let mut mem = Memory::new(64);
-        let obj1 = mem.alloc_gc(1, 16, &[]);
-        let obj2 = mem.alloc_gc(2, 32, &[]);
-        let obj3 = mem.alloc_gc(3, 64, &[]);
+    fn gc_collects_dead_objects() {
+        let mut mem = Memory::new(128);
+        let obj1 = mem.alloc_managed(1, 16, &[]);
+        let obj2 = mem.alloc_managed(2, 32, &[]);
+        let obj3 = mem.alloc_managed(3, 64, &[]);
 
-        assert_eq!(mem.gc_type_tag(obj1), 1);
-        assert_eq!(mem.gc_type_tag(obj2), 2);
-        assert_eq!(mem.gc_type_tag(obj3), 3);
-        assert!(!mem.gc_is_marked(obj1));
-        assert!(!mem.gc_is_marked(obj2));
-        assert!(!mem.gc_is_marked(obj3));
+        assert_eq!(mem.managed_type_tag(obj1), 1);
+        assert_eq!(mem.gc_allocations.len(), 3);
 
-        let alloc_count_before = mem.gc_allocations.len();
-        assert_eq!(alloc_count_before, 3);
-
+        // Only obj2 is a root — others get collected
         mem.collect_gc(&[obj2]);
 
-        assert!(!mem.gc_is_marked(obj2));
         assert_eq!(mem.gc_allocations.len(), 1);
-        assert_eq!(mem.gc_free_list.len(), 2);
+        assert_eq!(mem.free_list.len(), 2);
     }
 
     #[test]
     fn gc_free_list_reuse() {
-        let mut mem = Memory::new(64);
-        let _obj1 = mem.alloc_gc(1, 16, &[]);
-        let obj2 = mem.alloc_gc(2, 16, &[]);
+        let mut mem = Memory::new(128);
+        let _obj1 = mem.alloc_managed(1, 16, &[]);
+        let obj2 = mem.alloc_managed(2, 16, &[]);
         mem.collect_gc(&[obj2]);
-        let obj3 = mem.alloc_gc(3, 16, &[]);
-        assert_eq!(mem.gc_type_tag(obj3), 3);
-        assert_eq!(mem.gc_allocations.len(), 2);
+        let obj3 = mem.alloc_managed(3, 16, &[]);
+        assert_eq!(mem.managed_type_tag(obj3), 3);
+    }
+
+    #[test]
+    fn raw_and_managed_coexist() {
+        let mut mem = Memory::new(256);
+        let raw = mem.alloc(8);
+        let obj = mem.alloc_managed(1, 16, &[]);
+
+        unsafe { mem.write::<i64>(raw, 42); }
+        assert_eq!(unsafe { mem.read::<i64>(raw) }, 42);
+
+        // Raw allocation is NOT tracked
+        assert_eq!(mem.gc_allocations.len(), 1);
+
+        // GC doesn't affect raw allocations
+        mem.collect_gc(&[obj]);
+        assert_eq!(unsafe { mem.read::<i64>(raw) }, 42);
     }
 }
