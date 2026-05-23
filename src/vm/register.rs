@@ -184,6 +184,16 @@ impl VmValue {
             _ => None,
         }
     }
+
+    /// SAFETY: caller must guarantee this VmValue is the Scalar variant.
+    /// Returns the raw u64 bits of the contained Register without branching.
+    #[inline(always)]
+    pub unsafe fn scalar_bits_unchecked(&self) -> u64 {
+        match self {
+            VmValue::Scalar(r) => unsafe { r.bits },
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
 }
 
 impl Default for VmValue {

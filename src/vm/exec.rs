@@ -461,8 +461,20 @@ fn op_loadk(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
 }
 
 fn op_move(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let value = unsafe { vm.value_unchecked(instr.b()) };
-    vm.set_value(instr.a(), value)?;
+    let a = instr.a();
+    let b = instr.b();
+    let src_val;
+    {
+        let frame = unsafe { vm.stack.current_unchecked() };
+        let val = unsafe { frame.get_unchecked(b) };
+        if let VmValue::Scalar(r) = val {
+            src_val = VmValue::scalar(*r);
+        } else {
+            src_val = val.clone();
+        }
+    }
+    let frame = unsafe { vm.stack.current_mut_unchecked() };
+    unsafe { frame.set_unchecked(a, src_val); }
     Ok(())
 }
 
@@ -1237,10 +1249,7 @@ impl Vm {
     pub unsafe fn scalar_unchecked(&self, register: u8) -> Register {
         let frame = unsafe { self.stack.current_unchecked() };
         let val = unsafe { frame.get_unchecked(register) };
-        match val {
-            VmValue::Scalar(r) => *r,
-            _ => unsafe { std::hint::unreachable_unchecked() },
-        }
+        Register { bits: unsafe { val.scalar_bits_unchecked() } }
     }
 
     pub fn value(&self, register: u8) -> Result<VmValue, VMError> {
