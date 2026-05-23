@@ -6,12 +6,12 @@ use crate::vm::register::{Register, VmValue};
 pub const MAX_REGISTERS: u8 = 64;
 
 pub struct Frame {
-    pub chunk: Rc<Chunk>,
-    pub pc: usize,
-    pub registers: Box<[VmValue]>,
-    pub return_base: Option<u8>,
-    pub expected_returns: u8,
-    pub function_name: String,
+    pub(crate) chunk: Rc<Chunk>,
+    pub(crate) pc: usize,
+    pub(crate) registers: Box<[VmValue]>,
+    pub(crate) return_base: Option<u8>,
+    pub(crate) expected_returns: u8,
+    pub(crate) function_name: String,
 }
 
 impl Frame {
@@ -33,6 +33,18 @@ impl Frame {
             expected_returns,
             function_name: name.into(),
         }
+    }
+
+    pub fn pc(&self) -> usize {
+        self.pc
+    }
+
+    pub fn function_name(&self) -> &str {
+        &self.function_name
+    }
+
+    pub fn chunk(&self) -> &Rc<Chunk> {
+        &self.chunk
     }
 
     pub fn get(&self, idx: u8) -> Option<&VmValue> {

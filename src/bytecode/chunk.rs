@@ -5,9 +5,9 @@ use crate::bytecode::module::SourceLocation;
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
-    pub code: Vec<Instruction>,
-    pub max_registers: u8,
-    pub source_map: BTreeMap<u32, SourceLocation>,
+    pub(crate) code: Vec<Instruction>,
+    pub(crate) max_registers: u8,
+    pub(crate) source_map: BTreeMap<u32, SourceLocation>,
 }
 
 impl Chunk {
@@ -35,6 +35,30 @@ impl Chunk {
 
     pub fn source_location(&self, pc: usize) -> Option<&SourceLocation> {
         self.source_map.get(&(pc as u32))
+    }
+
+    pub fn code(&self) -> &[Instruction] {
+        &self.code
+    }
+
+    pub fn code_mut(&mut self) -> &mut Vec<Instruction> {
+        &mut self.code
+    }
+
+    pub fn max_registers(&self) -> u8 {
+        self.max_registers
+    }
+
+    pub fn set_max_registers(&mut self, n: u8) {
+        self.max_registers = n;
+    }
+
+    pub fn source_map(&self) -> &BTreeMap<u32, SourceLocation> {
+        &self.source_map
+    }
+
+    pub fn source_map_mut(&mut self) -> &mut BTreeMap<u32, SourceLocation> {
+        &mut self.source_map
     }
 }
 

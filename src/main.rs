@@ -115,9 +115,9 @@ fn load_text_module(path: &Path) -> Result<Module, String> {
 fn check_imports(module: &Module) -> Result<(), String> {
     validate_module(module).map_err(|error| format!("validation error: {error}"))?;
     let linker = std_linker();
-    for callable in &module.callables {
+    for callable in module.callables() {
         if let ember::Callable::Import(id) = callable {
-            let import = &module.imports[*id as usize];
+            let import = &module.imports()[*id as usize];
             if import.is_native() && !linker.contains_native(import) {
                 return Err(format!("unresolved native import `{import}`"));
             }
@@ -127,7 +127,7 @@ fn check_imports(module: &Module) -> Result<(), String> {
 }
 
 fn require_entry(module: &Module) -> Result<(), String> {
-    if module.entry.is_none() {
+    if module.entry().is_none() {
         return Err("module has no entry point".to_string());
     }
     Ok(())

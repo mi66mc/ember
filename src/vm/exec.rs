@@ -247,10 +247,10 @@ pub struct FrameInfo {
 }
 
 pub struct Vm {
-    pub stack: CallStack,
-    pub memory: Memory,
-    pub globals: Vec<VmValue>,
-    pub linker: NativeLinker,
+    pub(crate) stack: CallStack,
+    pub(crate) memory: Memory,
+    pub(crate) globals: Vec<VmValue>,
+    pub(crate) linker: NativeLinker,
     module: Option<Rc<Module>>,
 }
 

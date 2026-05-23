@@ -6,7 +6,7 @@ pub enum ImportKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDecl {
-    pub kind: ImportKind,
+    pub(crate) kind: ImportKind,
 }
 
 impl ImportDecl {

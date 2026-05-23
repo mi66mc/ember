@@ -15,19 +15,33 @@ pub struct SourceLocation {
 
 #[derive(Debug, Clone)]
 pub struct Function {
-    pub name: String,
-    pub chunk: Chunk,
+    pub(crate) name: String,
+    pub(crate) chunk: Chunk,
+}
+
+impl Function {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn chunk(&self) -> &Chunk {
+        &self.chunk
+    }
+
+    pub fn chunk_mut(&mut self) -> &mut Chunk {
+        &mut self.chunk
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Module {
-    pub name: String,
-    pub version: u16,
-    pub entry: Option<u32>,
-    pub constants: Vec<Constant>,
-    pub imports: Vec<ImportDecl>,
-    pub callables: Vec<Callable>,
-    pub functions: Vec<Function>,
+    pub(crate) name: String,
+    pub(crate) version: u16,
+    pub(crate) entry: Option<u32>,
+    pub(crate) constants: Vec<Constant>,
+    pub(crate) imports: Vec<ImportDecl>,
+    pub(crate) callables: Vec<Callable>,
+    pub(crate) functions: Vec<Function>,
 }
 
 impl Module {
@@ -45,6 +59,34 @@ impl Module {
 
     pub fn entry_function(&self) -> Option<&Function> {
         self.entry.and_then(|e| self.functions.get(e as usize))
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub fn entry(&self) -> Option<u32> {
+        self.entry
+    }
+
+    pub fn constants(&self) -> &[Constant] {
+        &self.constants
+    }
+
+    pub fn imports(&self) -> &[ImportDecl] {
+        &self.imports
+    }
+
+    pub fn callables(&self) -> &[Callable] {
+        &self.callables
+    }
+
+    pub fn functions(&self) -> &[Function] {
+        &self.functions
     }
 }
 
