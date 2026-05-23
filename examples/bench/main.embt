@@ -1,0 +1,45 @@
+.module "bench"
+.entry 0
+
+.import
+  io.print_i64
+
+;; Runs fib(30) 1000 times in a loop, then prints the last result.
+
+.constants
+  0 i64 30      ;; n
+  1 i64 0       ;; a (init)
+  2 i64 1       ;; b (init)
+  3 i64 1       ;; step
+  4 i64 10000   ;; iterations
+
+.callables
+  0 io.print_i64
+
+.functions
+  0 "main" regs=6
+    loadk r5, 4            ;; r5 = 10000 (outer loop counter)
+
+    @outer:
+    loadk r0, 0            ;; r0 = 30
+    loadk r1, 1            ;; r1 = 0
+    loadk r2, 2            ;; r2 = 1
+    loadk r3, 3            ;; r3 = 1
+
+    @inner:
+    jmpifnot r0, @done     ;; if n == 0, done
+    move r4, r1            ;; temp = a
+    move r1, r2            ;; a = b
+    add.i64 r2, r4, r2     ;; b = temp + b
+    sub.i64 r0, r0, r3     ;; n--
+    jmp @inner
+
+    @done:
+    sub.i64 r5, r5, r3     ;; iterations--
+    jmpif r5, @outer
+
+    closure r0, 0, 0       ;; print_i64
+    move r2, r1            ;; result
+    call r0, 1, 0          ;; print fib(30)
+    halt
+  end
