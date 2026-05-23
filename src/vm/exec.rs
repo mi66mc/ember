@@ -136,7 +136,7 @@ macro_rules! shiftop {
 macro_rules! loadop {
     ($vm:ident, $instr:ident, $typ:ty, $from:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        let pc = $vm.stack.current_unchecked().pc.wrapping_sub(1);
+        let pc = unsafe { $vm.stack.current_unchecked() }.pc.wrapping_sub(1);
         let base = unsafe { $vm.scalar_unchecked(b).ptr };
         let addr = base
             .checked_add(c as usize)
@@ -160,7 +160,7 @@ macro_rules! loadop {
 macro_rules! storeop {
     ($vm:ident, $instr:ident, $field:ident, $typ:ty) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        let pc = $vm.stack.current_unchecked().pc.wrapping_sub(1);
+        let pc = unsafe { $vm.stack.current_unchecked() }.pc.wrapping_sub(1);
         let base = unsafe { $vm.scalar_unchecked(a).ptr };
         let addr = base
             .checked_add(b as usize)
@@ -362,20 +362,22 @@ impl Vm {
                     return Ok(());
                 }
                 Err(VMError::Thrown(value)) => {
-                    if let Some(handler_pc) = self
-                        .stack
-                        .current()
-                        .and_then(|f| f.current_handler())
-                    {
+                    if let Some(handler_pc) = unsafe {
                         self.stack
-                            .current_mut()
-                            .ok_or(VMError::StackUnderflow)?
-                            .pc = handler_pc as usize;
-                        self.set_value(0, value)?;
-                        self.stack
-                            .current_mut()
-                            .ok_or(VMError::StackUnderflow)?
-                            .pop_handler();
+                            .current_unchecked()
+                            .current_handler()
+                    } {
+                        unsafe {
+                            self.stack
+                                .current_mut_unchecked()
+                                .pc = handler_pc as usize;
+                            self.set_value_unchecked(0, value);
+                        }
+                        unsafe {
+                            self.stack
+                                .current_mut_unchecked()
+                                .pop_handler();
+                        }
                         continue;
                     } else {
                         self.stack.pop_frame();
@@ -478,21 +480,21 @@ impl Vm {
                         let offset = self.constant_section.get(&bx)
                             .copied()
                             .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-                        unsafe { self.set_scalar_unchecked(instr.a(), Register::from_ptr(offset)); }
+                        self.set_scalar(instr.a(), Register::from_ptr(offset))?;
                     }
-                    constant => unsafe { self.set_scalar_unchecked(
+                    constant => self.set_scalar(
                         instr.a(),
                         Register {
                             bits: constant
                                 .to_bits()
                                 .expect("non-bytes constants always have scalar bits"),
                         },
-                    ) },
+                    )?,
                 }
             }
             Opcode::MOVE => {
                 let value = unsafe { self.value_unchecked(instr.b()) };
-                unsafe { self.set_value_unchecked(instr.a(), value); }
+                self.set_value(instr.a(), value)?;
             }
 
             // SAFETY: LOAD ops read ptr (address) via union access; the compiler
@@ -717,11 +719,11 @@ impl Vm {
                 let idx = instr.b() as usize;
                 let closure_reg = instr.c();
                 let value = unsafe { self.value_unchecked(src) };
-                let frame = self
+                let frame = unsafe { self
                     .stack
-                    .current_mut_unchecked();
-                let slot = frame
-                    .get_mut_unchecked(closure_reg);
+                    .current_mut_unchecked() };
+                let slot = unsafe { frame
+                    .get_mut_unchecked(closure_reg) };
                 match slot {
                     VmValue::Closure { upvalues, .. } => {
                         if idx >= upvalues.borrow().len() {
@@ -735,29 +737,33 @@ impl Vm {
 
             Opcode::TRY => {
                 let offset = instr.bx() as i16 as isize;
-                let handler_pc = self.stack.current_unchecked()
-                    .pc.wrapping_sub(1).wrapping_add(offset as usize);
-                self.stack
+                let handler_pc = unsafe { self.stack.current_unchecked()
+                    .pc.wrapping_sub(1).wrapping_add(offset as usize) };
+                unsafe { self.stack
                     .current_mut_unchecked()
-                    .push_handler(handler_pc as u32);
+                    .push_handler(handler_pc as u32); }
             }
             Opcode::ENDTRY => {
-                self.stack
+                unsafe { self.stack
                     .current_mut_unchecked()
-                    .pop_handler();
+                    .pop_handler(); }
             }
             Opcode::THROW => {
                 let value = unsafe { self.value_unchecked(instr.a()) };
-                if let Some(handler_pc) = self.stack.current_unchecked()
-                    .current_handler()
+                if let Some(handler_pc) = unsafe { self.stack.current_unchecked()
+                    .current_handler() }
                 {
-                    self.stack
-                        .current_mut_unchecked()
-                        .pc = handler_pc as usize;
-                    unsafe { self.set_value_unchecked(0, value); }
-                    self.stack
-                        .current_mut_unchecked()
-                        .pop_handler();
+                    unsafe {
+                        self.stack
+                            .current_mut_unchecked()
+                            .pc = handler_pc as usize;
+                        self.set_value_unchecked(0, value);
+                    }
+                    unsafe {
+                        self.stack
+                            .current_mut_unchecked()
+                            .pop_handler();
+                    }
                 } else {
                     self.stack.pop_frame();
                     if self.stack.is_empty() {
@@ -790,14 +796,13 @@ impl Vm {
                                 .get(*function_id as usize)
                                 .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
                             let mut upvalues = Vec::with_capacity(upvalue_count);
-                            let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
+                            let frame = unsafe { self.stack.current_unchecked() };
                             let reg_count = frame.chunk.max_registers as usize;
                             for i in 0..upvalue_count {
                                 let reg_idx = reg_count - upvalue_count + i;
                                 upvalues.push(
-                                    frame
-                                        .get(reg_idx as u8)
-                                        .ok_or(VMError::InvalidRegister(reg_idx as u8))?
+                                    unsafe { frame
+                                        .get_unchecked(reg_idx as u8) }
                                         .clone(),
                                 );
                             }
@@ -831,20 +836,20 @@ impl Vm {
                         .checked_add(1)
                         .and_then(|v| v.checked_add(index))
                         .ok_or(VMError::InvalidRegister(base))?;
-                    args.push(self.value(src)?);
+                    args.push(unsafe { self.value_unchecked(src) });
                 }
 
-                let callable = self.value(base)?;
+                let callable = unsafe { self.value_unchecked(base) };
 
                 if let Some(function) = callable.as_function() {
-                    let frame = self.stack.current_mut().ok_or(VMError::StackUnderflow)?;
+                    let frame = unsafe { self.stack.current_mut_unchecked() };
                     frame.set_chunk(function);
                     frame.pc = 0;
                     for (i, arg) in args.into_iter().enumerate() {
-                        frame.set(i as u8, arg);
+                        unsafe { frame.set_unchecked(i as u8, arg); }
                     }
                     // Store function reference for nested CALLTAIL
-                    frame.set(arg_count, callable);
+                    unsafe { frame.set_unchecked(arg_count, callable); }
                 } else if let Some(idx) = callable.as_native_import() {
                     let returns = self
                         .linker
@@ -854,16 +859,16 @@ impl Vm {
                         let tgt = base
                             .checked_add(i as u8)
                             .ok_or(VMError::InvalidRegister(base))?;
-                        self.set_value(tgt, val)?;
+                        unsafe { self.set_value_unchecked(tgt, val); }
                     }
                     return self.ret(base, 0);
                 } else if let Some(closure) = callable.as_closure() {
                     let (chunk, _upvalues) = closure;
-                    let frame = self.stack.current_mut().ok_or(VMError::StackUnderflow)?;
+                    let frame = unsafe { self.stack.current_mut_unchecked() };
                     frame.set_chunk(chunk.clone());
                     frame.pc = 0;
                     for (i, arg) in args.into_iter().enumerate() {
-                        frame.set(i as u8, arg);
+                        unsafe { frame.set_unchecked(i as u8, arg); }
                     }
                 } else {
                     return Err(VMError::ExpectedFunction(base));
@@ -884,7 +889,7 @@ impl Vm {
                 if gx >= MAX_GLOBALS {
                     return Err(VMError::NativeError("global index out of range".to_string()));
                 }
-                let value = self.value(instr.a())?;
+                let value = unsafe { self.value_unchecked(instr.a()) };
                 if gx >= self.globals.len() {
                     self.globals.resize(gx + 1, VmValue::default());
                 }
@@ -898,7 +903,7 @@ impl Vm {
                     .ok_or(VMError::InvalidConversionType(from_type))?;
                 let to =
                     ValueType::from_byte(to_type).ok_or(VMError::InvalidConversionType(to_type))?;
-                let result = convert_register(self.scalar(instr.b())?, from, to);
+                let result = convert_register(unsafe { self.scalar_unchecked(instr.b()) }, from, to);
                 self.set_scalar(instr.a(), result)?;
             }
             Opcode::EXT => {
@@ -925,11 +930,11 @@ impl Vm {
     /// value at register is a Scalar. Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn scalar_unchecked(&self, register: u8) -> Register {
-        let frame = self.stack.current_unchecked();
-        let val = frame.get_unchecked(register);
+        let frame = unsafe { self.stack.current_unchecked() };
+        let val = unsafe { frame.get_unchecked(register) };
         match val {
             VmValue::Scalar(r) => *r,
-            _ => std::hint::unreachable_unchecked(),
+            _ => unsafe { std::hint::unreachable_unchecked() },
         }
     }
 
@@ -946,7 +951,7 @@ impl Vm {
     /// Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn value_unchecked(&self, register: u8) -> VmValue {
-        self.stack.current_unchecked().get_unchecked(register).clone()
+        unsafe { self.stack.current_unchecked().get_unchecked(register).clone() }
     }
 
     pub fn set_scalar(&mut self, register: u8, value: Register) -> Result<(), VMError> {
@@ -957,7 +962,7 @@ impl Vm {
     /// Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn set_scalar_unchecked(&mut self, register: u8, value: Register) {
-        self.set_value_unchecked(register, VmValue::scalar(value));
+        unsafe { self.set_value_unchecked(register, VmValue::scalar(value)); }
     }
 
     pub fn set_value(&mut self, register: u8, value: VmValue) -> Result<(), VMError> {
@@ -973,7 +978,7 @@ impl Vm {
     /// Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn set_value_unchecked(&mut self, register: u8, value: VmValue) {
-        self.stack.current_mut_unchecked().set_unchecked(register, value);
+        unsafe { self.stack.current_mut_unchecked().set_unchecked(register, value); }
     }
 
     pub fn collect_roots(&self) -> Vec<usize> {
@@ -990,7 +995,7 @@ impl Vm {
     }
 
     fn fetch(&self) -> Result<Instruction, VMError> {
-        let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
+        let frame = unsafe { self.stack.current_unchecked() };
         if frame.pc >= frame.code_len {
             return Err(VMError::InvalidProgramCounter {
                 pc: frame.pc,
@@ -1006,7 +1011,7 @@ impl Vm {
     }
 
     fn jump(&mut self, offset: i16) -> Result<(), VMError> {
-        let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
+        let frame = unsafe { self.stack.current_unchecked() };
         let from = frame.pc;
         let target = from as isize + offset as isize;
         if target < 0 {
@@ -1017,7 +1022,7 @@ impl Vm {
     }
 
     fn call(&mut self, base: u8, arg_count: u8, expected_returns: u8) -> Result<(), VMError> {
-        let callable = self.value(base)?;
+        let callable = unsafe { self.value_unchecked(base) };
 
         let mut args = Vec::with_capacity(arg_count as usize);
         for index in 0..arg_count {
@@ -1025,7 +1030,7 @@ impl Vm {
                 .checked_add(1)
                 .and_then(|value| value.checked_add(index))
                 .ok_or(VMError::InvalidRegister(base))?;
-            args.push(self.value(source)?);
+            args.push(unsafe { self.value_unchecked(source) });
         }
 
         if let Some(function) = callable.as_function() {
@@ -1035,9 +1040,9 @@ impl Vm {
 
             self.stack.push_call(function.clone(), base, expected_returns, "anon");
             for (index, value) in args.into_iter().enumerate() {
-                self.set_value(index as u8, value)?;
+                unsafe { self.set_value_unchecked(index as u8, value); }
             }
-            self.set_value(arg_count, callable)?;
+            unsafe { self.set_value_unchecked(arg_count, callable); }
             return Ok(());
         }
 
@@ -1048,9 +1053,9 @@ impl Vm {
 
             let chunk_clone = chunk.clone();
             self.stack.push_call(chunk_clone, base, expected_returns, "anon");
-            self.set_value(arg_count, callable)?;
+            unsafe { self.set_value_unchecked(arg_count, callable); }
             for (index, value) in args.into_iter().enumerate() {
-                self.set_value(index as u8, value)?;
+                unsafe { self.set_value_unchecked(index as u8, value); }
             }
             return Ok(());
         }
@@ -1065,13 +1070,13 @@ impl Vm {
                 let target = base
                     .checked_add(index as u8)
                     .ok_or(VMError::InvalidRegister(base))?;
-                self.set_value(target, value)?;
+                unsafe { self.set_value_unchecked(target, value); }
             }
             for index in copy_count..expected_returns as usize {
                 let target = base
                     .checked_add(index as u8)
                     .ok_or(VMError::InvalidRegister(base))?;
-                self.set_value(target, VmValue::default())?;
+                unsafe { self.set_value_unchecked(target, VmValue::default()); }
             }
             return Ok(());
         }
@@ -1085,7 +1090,7 @@ impl Vm {
             let source = base
                 .checked_add(index)
                 .ok_or(VMError::InvalidRegister(base))?;
-            returns.push(self.value(source)?);
+            returns.push(unsafe { self.value_unchecked(source) });
         }
 
         let frame = self.stack.pop_frame().ok_or(VMError::StackUnderflow)?;
@@ -1098,13 +1103,13 @@ impl Vm {
             let target = return_base
                 .checked_add(index as u8)
                 .ok_or(VMError::InvalidRegister(return_base))?;
-            self.set_value(target, value)?;
+            unsafe { self.set_value_unchecked(target, value); }
         }
         for index in copy_count..frame.expected_returns as usize {
             let target = return_base
                 .checked_add(index as u8)
                 .ok_or(VMError::InvalidRegister(return_base))?;
-            self.set_value(target, VmValue::default())?;
+            unsafe { self.set_value_unchecked(target, VmValue::default()); }
         }
 
         Ok(())

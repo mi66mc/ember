@@ -71,7 +71,7 @@ impl Frame {
     /// Guaranteed by the bytecode validator at compile time.
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, idx: u8) -> &VmValue {
-        self.registers.get_unchecked(idx as usize)
+        unsafe { self.registers.get_unchecked(idx as usize) }
     }
 
     pub fn set(&mut self, idx: u8, value: VmValue) -> bool {
@@ -87,7 +87,7 @@ impl Frame {
     /// Guaranteed by the bytecode validator at compile time.
     #[inline(always)]
     pub unsafe fn set_unchecked(&mut self, idx: u8, value: VmValue) {
-        *self.registers.get_unchecked_mut(idx as usize) = value;
+        unsafe { *self.registers.get_unchecked_mut(idx as usize) = value; }
     }
 
     pub fn get_mut(&mut self, idx: u8) -> Option<&mut VmValue> {
@@ -98,7 +98,7 @@ impl Frame {
     /// Guaranteed by the bytecode validator at compile time.
     #[inline(always)]
     pub unsafe fn get_mut_unchecked(&mut self, idx: u8) -> &mut VmValue {
-        self.registers.get_unchecked_mut(idx as usize)
+        unsafe { self.registers.get_unchecked_mut(idx as usize) }
     }
 
     pub fn get_scalar(&self, idx: u8) -> Option<Register> {
@@ -168,7 +168,7 @@ impl CallStack {
     /// SAFETY: caller must guarantee the stack is non-empty.
     #[inline(always)]
     pub unsafe fn current_unchecked(&self) -> &Frame {
-        self.frames.get_unchecked(self.frames.len() - 1)
+        unsafe { self.frames.get_unchecked(self.frames.len() - 1) }
     }
 
     pub fn current_mut(&mut self) -> Option<&mut Frame> {
@@ -179,7 +179,7 @@ impl CallStack {
     #[inline(always)]
     pub unsafe fn current_mut_unchecked(&mut self) -> &mut Frame {
         let len = self.frames.len();
-        self.frames.get_unchecked_mut(len - 1)
+        unsafe { self.frames.get_unchecked_mut(len - 1) }
     }
 
     pub fn depth(&self) -> usize {
