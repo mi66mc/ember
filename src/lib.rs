@@ -6,4 +6,4 @@ pub use bytecode::{
     Opcode, SourceLocation, ValueType,
 };
 pub use vm::native::{ImportIndex, NativeError, NativeLinker, NativeModule, NativeResult};
-pub use vm::{VMError, Vm};
+pub use vm::{DebugAction, DebugHook, VMError, Vm};

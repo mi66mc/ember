@@ -94,6 +94,14 @@ impl Frame {
         }
         roots
     }
+
+    pub fn register_count(&self) -> usize {
+        self.registers.len()
+    }
+
+    pub fn register_value(&self, idx: u8) -> Option<&VmValue> {
+        self.registers.get(idx as usize)
+    }
 }
 
 pub struct CallStack {

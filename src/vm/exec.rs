@@ -7,7 +7,16 @@ use crate::bytecode::{
 use crate::vm::memory::Memory;
 use crate::vm::native::{NativeError, NativeLinker};
 use crate::vm::register::{Register, VmValue};
-use crate::vm::stack::CallStack;
+use crate::vm::stack::{CallStack, Frame};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugAction {
+    Continue,
+    Step,
+    Break,
+}
+
+pub type DebugHook = Box<dyn Fn(&Frame, usize, Option<u32>) -> DebugAction + Send>;
 
 // ── Safety contract for union field access in macros ──────────────
 //
@@ -255,6 +264,7 @@ pub struct Vm {
     pub(crate) linker: NativeLinker,
     module: Option<Rc<Module>>,
     constant_section: HashMap<usize, usize>,
+    pub(crate) debug_hook: Option<DebugHook>,
 }
 
 pub type VM = Vm;
@@ -270,6 +280,7 @@ impl Vm {
             linker: NativeLinker::default(),
             module: None,
             constant_section: HashMap::new(),
+            debug_hook: None,
         }
     }
 
@@ -281,6 +292,7 @@ impl Vm {
             linker,
             module: None,
             constant_section: HashMap::new(),
+            debug_hook: None,
         }
     }
 
@@ -392,8 +404,29 @@ impl Vm {
         }
     }
 
+    pub fn set_debug_hook(&mut self, hook: DebugHook) {
+        self.debug_hook = Some(hook);
+    }
+
+    pub fn clear_debug_hook(&mut self) {
+        self.debug_hook = None;
+    }
+
     pub fn step(&mut self) -> Result<(), VMError> {
         let instr = self.fetch()?;
+        if let Some(ref hook) = self.debug_hook {
+            if let Some(frame) = self.stack.current() {
+                let source_line = frame.chunk.source_location(frame.pc).map(|l| l.line);
+                match hook(frame, frame.pc, source_line) {
+                    DebugAction::Continue => {}
+                    DebugAction::Step => {}
+                    DebugAction::Break => {
+                        self.clear_debug_hook();
+                        return Ok(());
+                    }
+                }
+            }
+        }
         self.stack.advance_pc();
 
         let mut extended_bits: u32 = 0;
@@ -782,6 +815,52 @@ impl Vm {
                 self.set_value(instr.a(), closure)?;
             }
             Opcode::CALL => self.call(instr.a(), instr.b(), instr.c())?,
+            Opcode::CALLTAIL => {
+                let base = instr.a();
+                let arg_count = instr.b();
+
+                let mut args = Vec::with_capacity(arg_count as usize);
+                for index in 0..arg_count {
+                    let src = base
+                        .checked_add(1)
+                        .and_then(|v| v.checked_add(index))
+                        .ok_or(VMError::InvalidRegister(base))?;
+                    args.push(self.value(src)?);
+                }
+
+                let callable = self.value(base)?;
+
+                if let Some(function) = callable.as_function() {
+                    let frame = self.stack.current_mut().ok_or(VMError::StackUnderflow)?;
+                    frame.chunk = function;
+                    frame.pc = 0;
+                    for (i, arg) in args.into_iter().enumerate() {
+                        frame.set(i as u8, arg);
+                    }
+                } else if let Some(idx) = callable.as_native_import() {
+                    let returns = self
+                        .linker
+                        .call(idx, &args, &mut self.memory)
+                        .map_err(|e| VMError::NativeError(e.message))?;
+                    for (i, val) in returns.into_iter().enumerate() {
+                        let tgt = base
+                            .checked_add(i as u8)
+                            .ok_or(VMError::InvalidRegister(base))?;
+                        self.set_value(tgt, val)?;
+                    }
+                    return self.ret(base, 0);
+                } else if let Some(closure) = callable.as_closure() {
+                    let (chunk, _upvalues) = closure;
+                    let frame = self.stack.current_mut().ok_or(VMError::StackUnderflow)?;
+                    frame.chunk = chunk.clone();
+                    frame.pc = 0;
+                    for (i, arg) in args.into_iter().enumerate() {
+                        frame.set(i as u8, arg);
+                    }
+                } else {
+                    return Err(VMError::ExpectedFunction(base));
+                }
+            }
             Opcode::RET => self.ret(instr.a(), instr.b())?,
 
             Opcode::GETG => {
@@ -1348,5 +1427,148 @@ mod tests {
         unsafe {
             assert_eq!(vm.scalar(1).unwrap().i64, 77);
         }
+    }
+
+    #[test]
+    fn tail_call_reuses_frame() {
+        let mut inner = Chunk::new();
+        inner.max_registers = 2;
+        inner.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        inner.emit(Instruction::abc(Opcode::RET, 0, 1, 0));
+
+        let mut outer = Chunk::new();
+        outer.max_registers = 3;
+        outer.emit(Instruction::abc(Opcode::CLOSURE, 0, 0, 0));
+        outer.emit(Instruction::abc(Opcode::CALLTAIL, 0, 0, 0));
+        outer.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = Module::new("test");
+        module.entry = Some(0);
+        module.constants = vec![Constant::I64(42)];
+        module.callables = vec![Callable::Function(1)];
+        module.functions.push(Function {
+            name: "outer".to_string(),
+            chunk: outer,
+        });
+        module.functions.push(Function {
+            name: "inner".to_string(),
+            chunk: inner,
+        });
+
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "outer");
+        vm.step().unwrap(); // CLOSURE
+        vm.step().unwrap(); // CALLTAIL
+        assert_eq!(vm.stack.current().unwrap().pc, 1);
+    }
+
+    #[test]
+    fn debug_hook_fires_for_each_instruction() {
+        let mut chunk = Chunk::new();
+        chunk.max_registers = 1;
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 1));
+        chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = module_for(chunk);
+        module.constants = vec![Constant::I64(10), Constant::I64(20)];
+
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+
+        let hook_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_calls_clone = hook_calls.clone();
+        vm.set_debug_hook(Box::new(move |_frame, pc, line| {
+            hook_calls_clone.lock().unwrap().push((pc, line));
+            DebugAction::Continue
+        }));
+
+        loop {
+            match vm.step() {
+                Ok(()) => {}
+                Err(VMError::Halted) => break,
+                Err(error) => panic!("unexpected error: {error:?}"),
+            }
+        }
+
+        let calls = hook_calls.lock().unwrap();
+        assert_eq!(calls.len(), 3, "hook should fire for each instruction");
+        assert_eq!(calls[0].0, 0);
+        assert_eq!(calls[1].0, 1);
+        assert_eq!(calls[2].0, 2);
+    }
+
+    #[test]
+    fn debug_hook_break_stops_execution() {
+        let mut chunk = Chunk::new();
+        chunk.max_registers = 1;
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = module_for(chunk);
+        module.constants = vec![Constant::I64(42)];
+
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+
+        let hook_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_called_clone = hook_called.clone();
+        vm.set_debug_hook(Box::new(move |_frame, _pc, _line| {
+            hook_called_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            DebugAction::Break
+        }));
+
+        let result = vm.step();
+        assert_eq!(result, Ok(()));
+        assert!(hook_called.load(std::sync::atomic::Ordering::Relaxed), "hook should have been called");
+        assert!(vm.debug_hook.is_none(), "hook should be cleared after Break");
+        assert_eq!(vm.stack.current().unwrap().pc, 0, "PC should not advance after Break");
+
+        let result = vm.step();
+        assert_eq!(result, Ok(()));
+        unsafe {
+            assert_eq!(vm.scalar(0).unwrap().i64, 42, "instruction should execute on next step");
+        }
+    }
+
+    #[test]
+    fn debug_hook_step_keeps_hook_active() {
+        let mut chunk = Chunk::new();
+        chunk.max_registers = 1;
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
+        chunk.emit(Instruction::abx(Opcode::LOADK, 0, 1));
+        chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
+
+        let mut module = module_for(chunk);
+        module.constants = vec![Constant::I64(1), Constant::I64(2)];
+
+        let mut vm = Vm::new(1024);
+        vm.module = Some(Rc::new(module));
+        let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
+        vm.stack.push_entry(Rc::new(entry), "test");
+
+        let hook_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let hook_count_clone = hook_count.clone();
+        vm.set_debug_hook(Box::new(move |_frame, _pc, _line| {
+            hook_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            DebugAction::Step
+        }));
+
+        loop {
+            match vm.step() {
+                Ok(()) => {}
+                Err(VMError::Halted) => break,
+                Err(error) => panic!("unexpected error: {error:?}"),
+            }
+        }
+
+        assert_eq!(hook_count.load(std::sync::atomic::Ordering::Relaxed), 3, "hook should fire for every instruction with Step");
+        assert!(vm.debug_hook.is_some(), "hook should remain set after Step");
     }
 }
