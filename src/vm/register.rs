@@ -23,7 +23,7 @@
 //    last written, because the union is exactly 64 bits wide and `u64` is
 //    valid for every possible bit pattern.
 
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
@@ -112,13 +112,29 @@ impl std::fmt::Debug for Register {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum VmValue {
     Scalar(Register),
     Function(Rc<Chunk>),
     NativeImport(ImportIndex),
-    Closure { chunk: Rc<Chunk>, upvalues: Rc<RefCell<Vec<VmValue>>> },
+    Closure { chunk: Rc<Chunk>, upvalues: Rc<UnsafeCell<Vec<VmValue>>> },
 }
+
+impl PartialEq for VmValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (VmValue::Scalar(a), VmValue::Scalar(b)) => a == b,
+            (VmValue::Function(a), VmValue::Function(b)) => Rc::ptr_eq(a, b),
+            (VmValue::NativeImport(a), VmValue::NativeImport(b)) => a == b,
+            (VmValue::Closure { chunk: a, upvalues: ua }, VmValue::Closure { chunk: b, upvalues: ub }) => {
+                Rc::ptr_eq(a, b) && unsafe { &*ua.get() == &*ub.get() }
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for VmValue {}
 
 impl VmValue {
     pub fn scalar(register: Register) -> Self {
@@ -134,7 +150,7 @@ impl VmValue {
     }
 
     pub fn closure(chunk: Rc<Chunk>, upvalues: Vec<VmValue>) -> Self {
-        VmValue::Closure { chunk, upvalues: Rc::new(RefCell::new(upvalues)) }
+        VmValue::Closure { chunk, upvalues: Rc::new(UnsafeCell::new(upvalues)) }
     }
 
     pub fn zero() -> Self {
@@ -162,7 +178,7 @@ impl VmValue {
         }
     }
 
-    pub fn as_closure(&self) -> Option<(&Rc<Chunk>, &Rc<RefCell<Vec<VmValue>>>)> {
+    pub fn as_closure(&self) -> Option<(&Rc<Chunk>, &Rc<UnsafeCell<Vec<VmValue>>>)> {
         match self {
             VmValue::Closure { chunk, upvalues } => Some((chunk, upvalues)),
             _ => None,

@@ -19,12 +19,12 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn entry(chunk: Rc<Chunk>, name: impl Into<String>) -> Self {
-        Self::new(chunk, None, 0, name)
+    pub fn entry(chunk: Rc<Chunk>, registers: Box<[VmValue]>, name: impl Into<String>) -> Self {
+        Self::new(chunk, registers, None, 0, name)
     }
 
-    pub fn call(chunk: Rc<Chunk>, return_base: u8, expected_returns: u8, name: impl Into<String>) -> Self {
-        Self::new(chunk, Some(return_base), expected_returns, name)
+    pub fn call(chunk: Rc<Chunk>, registers: Box<[VmValue]>, return_base: u8, expected_returns: u8, name: impl Into<String>) -> Self {
+        Self::new(chunk, registers, Some(return_base), expected_returns, name)
     }
 
     pub fn set_chunk(&mut self, chunk: Rc<Chunk>) {
@@ -33,8 +33,7 @@ impl Frame {
         self.chunk = chunk;
     }
 
-    fn new(chunk: Rc<Chunk>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
-        let num_regs = chunk.max_registers as usize;
+    fn new(chunk: Rc<Chunk>, registers: Box<[VmValue]>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
         let code_ptr = chunk.code.as_ptr();
         let code_len = chunk.code.len();
         Frame {
@@ -42,7 +41,7 @@ impl Frame {
             code_ptr,
             code_len,
             pc: 0,
-            registers: vec![VmValue::default(); num_regs].into_boxed_slice(),
+            registers,
             return_base,
             expected_returns,
             function_name: name.into(),
@@ -141,24 +140,42 @@ impl Frame {
 
 pub struct CallStack {
     frames: Vec<Frame>,
+    register_pool: Vec<Box<[VmValue]>>,
 }
 
 impl CallStack {
     pub fn new() -> Self {
-        CallStack { frames: Vec::new() }
+        CallStack { frames: Vec::new(), register_pool: Vec::new() }
     }
 
     pub fn push_entry(&mut self, chunk: Rc<Chunk>, name: impl Into<String>) {
-        self.frames.push(Frame::entry(chunk, name));
+        let regs = self.acquire_registers(chunk.max_registers as usize);
+        self.frames.push(Frame::entry(chunk, regs, name));
     }
 
     pub fn push_call(&mut self, chunk: Rc<Chunk>, return_base: u8, expected_returns: u8, name: impl Into<String>) {
+        let regs = self.acquire_registers(chunk.max_registers as usize);
         self.frames
-            .push(Frame::call(chunk, return_base, expected_returns, name));
+            .push(Frame::call(chunk, regs, return_base, expected_returns, name));
     }
 
     pub fn pop_frame(&mut self) -> Option<Frame> {
-        self.frames.pop()
+        let mut frame = self.frames.pop()?;
+        let old_regs = std::mem::replace(&mut frame.registers, Box::new([]));
+        self.register_pool.push(old_regs);
+        Some(frame)
+    }
+
+    fn acquire_registers(&mut self, count: usize) -> Box<[VmValue]> {
+        if let Some(pos) = self.register_pool.iter().position(|r| r.len() == count) {
+            let mut regs = self.register_pool.swap_remove(pos);
+            for r in regs.iter_mut() {
+                *r = VmValue::zero();
+            }
+            regs
+        } else {
+            vec![VmValue::zero(); count].into_boxed_slice()
+        }
     }
 
     pub fn current(&self) -> Option<&Frame> {
@@ -238,7 +255,9 @@ mod tests {
 
     #[test]
     fn frame_register_access_is_checked() {
-        let mut frame = Frame::entry(make_chunk(1), "test");
+        let chunk = make_chunk(1);
+        let regs = vec![VmValue::zero(); 1].into_boxed_slice();
+        let mut frame = Frame::entry(chunk.clone(), regs, "test");
         assert!(frame.set(0, VmValue::scalar(Register::from_i64(42))));
         assert!(!frame.set(1, VmValue::scalar(Register::from_i64(100))));
         unsafe {

@@ -12,19 +12,26 @@
 pub struct Memory {
     data: Vec<u8>,
     bump: usize,
-    pub(crate) free_list: Vec<(usize, usize)>,
+    pub(crate) free_lists: [Vec<(usize, usize)>; NUM_SIZE_CLASSES],
     pub(crate) gc_allocations: Vec<(usize, usize)>, // (header_addr, total_size) for managed objs
     gc_threshold: usize,
 }
 
 const DEFAULT_GC_THRESHOLD: usize = 262144;
+const NUM_SIZE_CLASSES: usize = 10;
+
+fn size_class(size: usize) -> usize {
+    let aligned = size.next_power_of_two();
+    let shift = aligned.trailing_zeros().saturating_sub(4) as usize;
+    shift.min(NUM_SIZE_CLASSES - 1)
+}
 
 impl Memory {
     pub fn new(initial_size: usize) -> Self {
         Memory {
             data: vec![0; initial_size],
             bump: 0,
-            free_list: Vec::new(),
+            free_lists: Default::default(),
             gc_allocations: Vec::new(),
             gc_threshold: DEFAULT_GC_THRESHOLD,
         }
@@ -45,12 +52,29 @@ impl Memory {
     /// Allocate raw bytes. No header, not tracked by GC.
     /// Used for constant section, manual buffers.
     pub fn alloc(&mut self, size: usize) -> usize {
-        if let Some(pos) = self.free_list.iter().position(|&(_, block_size)| block_size >= size) {
-            let (addr, block_size) = self.free_list.swap_remove(pos);
+        if size == 0 {
+            return self.bump;
+        }
+        let class = size_class(size);
+        // Try the matching size class first
+        if let Some(pos) = self.free_lists[class].iter().position(|&(_, block_size)| block_size >= size) {
+            let (addr, block_size) = self.free_lists[class].swap_remove(pos);
             if block_size > size {
-                self.free_list.push((addr + size, block_size - size));
+                let remainder_class = size_class(block_size - size);
+                self.free_lists[remainder_class].push((addr + size, block_size - size));
             }
             return addr;
+        }
+        // Try larger size classes
+        for c in (class + 1)..NUM_SIZE_CLASSES {
+            if let Some(pos) = self.free_lists[c].iter().position(|&(_, block_size)| block_size >= size) {
+                let (addr, block_size) = self.free_lists[c].swap_remove(pos);
+                if block_size > size {
+                    let remainder_class = size_class(block_size - size);
+                    self.free_lists[remainder_class].push((addr + size, block_size - size));
+                }
+                return addr;
+            }
         }
         let end = self.bump + size;
         if end > self.data.len() {
@@ -80,7 +104,8 @@ impl Memory {
         }
         let header = payload_ptr - 8;
         let size = unsafe { (self.data.as_ptr().add(header) as *const u64).read_unaligned() } as usize;
-        self.free_list.push((header, size + 8));
+        let class = size_class(size + 8);
+        self.free_lists[class].push((header, size + 8));
     }
 
     // ── Managed allocation (GC-tracked) ──────────────────
@@ -101,16 +126,31 @@ impl Memory {
         }
         let total = size + 2;
         // Try free list (freed by previous GC sweep)
-        if let Some(pos) = self.free_list.iter().position(|&(_, block_size)| block_size >= total) {
-            let (addr, block_size) = self.free_list.swap_remove(pos);
+        let class = size_class(total);
+        if let Some(pos) = self.free_lists[class].iter().position(|&(_, block_size)| block_size >= total) {
+            let (addr, block_size) = self.free_lists[class].swap_remove(pos);
             if block_size > total {
-                self.free_list.push((addr + total, block_size - total));
+                let remainder_class = size_class(block_size - total);
+                self.free_lists[remainder_class].push((addr + total, block_size - total));
             }
-            // SAFETY: addr is within data, allocated by alloc_managed or sweep
             self.data[addr] = 0;       // mark bit
             self.data[addr + 1] = type_tag;
             self.gc_allocations.push((addr, total));
             return addr + 2;            // payload pointer
+        }
+        // Try larger size classes
+        for c in (class + 1)..NUM_SIZE_CLASSES {
+            if let Some(pos) = self.free_lists[c].iter().position(|&(_, block_size)| block_size >= total) {
+                let (addr, block_size) = self.free_lists[c].swap_remove(pos);
+                if block_size > total {
+                    let remainder_class = size_class(block_size - total);
+                    self.free_lists[remainder_class].push((addr + total, block_size - total));
+                }
+                self.data[addr] = 0;
+                self.data[addr + 1] = type_tag;
+                self.gc_allocations.push((addr, total));
+                return addr + 2;
+            }
         }
         // Bump allocate
         let header = self.bump;
@@ -146,7 +186,8 @@ impl Memory {
                 self.data[header] = 0; // clear mark for next cycle
                 surviving.push((header, total));
             } else {
-                self.free_list.push((header, total));
+                let class = size_class(total);
+                self.free_lists[class].push((header, total));
             }
         }
         self.gc_allocations = surviving;
@@ -179,7 +220,9 @@ impl Memory {
 
     pub fn reset(&mut self) {
         self.bump = 0;
-        self.free_list.clear();
+        for list in self.free_lists.iter_mut() {
+            list.clear();
+        }
         self.gc_allocations.clear();
     }
 
@@ -327,7 +370,7 @@ mod tests {
         mem.collect_gc(&[obj2]);
 
         assert_eq!(mem.gc_allocations.len(), 1);
-        assert_eq!(mem.free_list.len(), 2);
+        assert!(mem.free_lists.iter().any(|l| !l.is_empty()));
     }
 
     #[test]

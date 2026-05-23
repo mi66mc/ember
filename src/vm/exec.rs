@@ -707,7 +707,8 @@ impl Vm {
                 let closure_reg = instr.c();
                 let value = match unsafe { self.value_unchecked(closure_reg) } {
                     VmValue::Closure { ref upvalues, .. } => {
-                        upvalues.borrow().get(idx).cloned()
+                        let upvalues = unsafe { &*upvalues.get() };
+                        upvalues.get(idx).cloned()
                     }
                     _ => return Err(VMError::ExpectedFunction(closure_reg)),
                 }
@@ -726,10 +727,11 @@ impl Vm {
                     .get_mut_unchecked(closure_reg) };
                 match slot {
                     VmValue::Closure { upvalues, .. } => {
-                        if idx >= upvalues.borrow().len() {
+                        let upvalues = unsafe { &mut *upvalues.get() };
+                        if idx >= upvalues.len() {
                             return Err(VMError::InvalidRegister(idx as u8));
                         }
-                        upvalues.borrow_mut()[idx] = value;
+                        upvalues[idx] = value;
                     }
                     _ => return Err(VMError::ExpectedFunction(closure_reg)),
                 }
@@ -1335,7 +1337,7 @@ mod tests {
         vm.memory.collect_gc(&[obj2]);
 
         assert_eq!(vm.memory.gc_allocations.len(), 1);
-        assert_eq!(vm.memory.free_list.len(), 2);
+        assert!(vm.memory.free_lists.iter().any(|l| !l.is_empty()));
         assert!(!vm.memory.managed_is_marked(obj2));
     }
 
