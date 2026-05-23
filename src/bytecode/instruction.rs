@@ -1,61 +1,89 @@
 use crate::bytecode::opcode::Opcode;
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instruction {
-    opcode: Opcode,
-    operands: [u8; 3],
+    pub opcode_byte: u8,
+    pub a: u8,
+    pub b: u8,
+    pub c: u8,
 }
 
 impl Instruction {
     pub fn new(opcode: Opcode, operands: [u8; 3]) -> Self {
-        Instruction { opcode, operands }
+        Instruction {
+            opcode_byte: opcode.to_byte(),
+            a: operands[0],
+            b: operands[1],
+            c: operands[2],
+        }
     }
 
     pub fn abc(opcode: Opcode, a: u8, b: u8, c: u8) -> Self {
-        Self::new(opcode, [a, b, c])
+        Instruction {
+            opcode_byte: opcode.to_byte(),
+            a,
+            b,
+            c,
+        }
     }
 
     pub fn abx(opcode: Opcode, a: u8, bx: u16) -> Self {
         let [b, c] = bx.to_le_bytes();
-        Self::new(opcode, [a, b, c])
+        Instruction {
+            opcode_byte: opcode.to_byte(),
+            a,
+            b,
+            c,
+        }
     }
 
     pub fn asbx(opcode: Opcode, a: u8, sbx: i16) -> Self {
         let [b, c] = sbx.to_le_bytes();
-        Self::new(opcode, [a, b, c])
+        Instruction {
+            opcode_byte: opcode.to_byte(),
+            a,
+            b,
+            c,
+        }
     }
 
     pub fn jmp(opcode: Opcode, offset: i16) -> Self {
         let [a, b] = offset.to_le_bytes();
-        Self::new(opcode, [a, b, 0])
+        Instruction {
+            opcode_byte: opcode.to_byte(),
+            a,
+            b,
+            c: 0,
+        }
     }
 
     pub fn opcode(&self) -> Opcode {
-        self.opcode
+        Opcode::from_byte(self.opcode_byte).unwrap_or(Opcode::NOP)
     }
 
     pub fn a(&self) -> u8 {
-        self.operands[0]
+        self.a
     }
 
     pub fn b(&self) -> u8 {
-        self.operands[1]
+        self.b
     }
 
     pub fn c(&self) -> u8 {
-        self.operands[2]
+        self.c
     }
 
     pub fn bx(&self) -> u16 {
-        u16::from_le_bytes([self.operands[1], self.operands[2]])
+        u16::from_le_bytes([self.b, self.c])
     }
 
     pub fn sbx(&self) -> i16 {
-        i16::from_le_bytes([self.operands[1], self.operands[2]])
+        i16::from_le_bytes([self.b, self.c])
     }
 
     pub fn sbx_ab(&self) -> i16 {
-        i16::from_le_bytes([self.operands[0], self.operands[1]])
+        i16::from_le_bytes([self.a, self.b])
     }
 }
 

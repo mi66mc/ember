@@ -17,7 +17,7 @@ pub struct Memory {
     gc_threshold: usize,
 }
 
-const DEFAULT_GC_THRESHOLD: usize = 65536;
+const DEFAULT_GC_THRESHOLD: usize = 262144;
 
 impl Memory {
     pub fn new(initial_size: usize) -> Self {
@@ -157,7 +157,7 @@ impl Memory {
             self.mark(root);
         }
         self.sweep();
-        let next = self.bump + 4096;
+        let next = std::cmp::max(self.bump * 2, self.bump + 65536);
         if next > self.gc_threshold {
             self.gc_threshold = next;
         }

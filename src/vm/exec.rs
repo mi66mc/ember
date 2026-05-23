@@ -37,98 +37,107 @@ pub type DebugHook = Box<dyn Fn(&Frame, usize, Option<u32>) -> DebugAction + Sen
 macro_rules! scalar_binop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        let vc = unsafe { $vm.scalar(c)?.$field };
-        $vm.set_scalar(a, Register::$from(vb.$method(vc)))?;
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        let vc = unsafe { $vm.scalar_unchecked(c).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.$method(vc))); }
     }};
 }
 
 macro_rules! float_binop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $op:tt) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        let vc = unsafe { $vm.scalar(c)?.$field };
-        $vm.set_scalar(a, Register::$from(vb $op vc))?;
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        let vc = unsafe { $vm.scalar_unchecked(c).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb $op vc)); }
     }};
 }
 
 macro_rules! int_divop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        let vc = unsafe { $vm.scalar(c)?.$field };
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        let vc = unsafe { $vm.scalar_unchecked(c).$field };
         if vc == 0 {
             return Err(VMError::DivisionByZero);
         }
-        $vm.set_scalar(a, Register::$from(vb.$method(vc)))?;
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.$method(vc))); }
     }};
 }
 
 macro_rules! int_negop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
         let (a, b) = ($instr.a(), $instr.b());
-        // SAFETY: typed opcodes guarantee register b was written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        $vm.set_scalar(a, Register::$from(vb.wrapping_neg()))?;
+        // SAFETY: typed opcodes guarantee register b was written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.wrapping_neg())); }
     }};
 }
 
 macro_rules! float_negop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
         let (a, b) = ($instr.a(), $instr.b());
-        // SAFETY: typed opcodes guarantee register b was written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        $vm.set_scalar(a, Register::$from(-vb))?;
+        // SAFETY: typed opcodes guarantee register b was written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(-vb)); }
     }};
 }
 
 macro_rules! cmpop {
     ($vm:ident, $instr:ident, $field:ident, $op:tt) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        let vc = unsafe { $vm.scalar(c)?.$field };
-        $vm.set_scalar(a, Register::from_bool(vb $op vc))?;
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        let vc = unsafe { $vm.scalar_unchecked(c).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::from_bool(vb $op vc)); }
     }};
 }
 
 macro_rules! bitop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $op:tt) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        let vc = unsafe { $vm.scalar(c)?.$field };
-        $vm.set_scalar(a, Register::$from(vb $op vc))?;
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        let vc = unsafe { $vm.scalar_unchecked(c).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb $op vc)); }
     }};
 }
 
 macro_rules! notop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
         let (a, b) = ($instr.a(), $instr.b());
-        // SAFETY: typed opcodes guarantee register b was written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        $vm.set_scalar(a, Register::$from(!vb))?;
+        // SAFETY: typed opcodes guarantee register b was written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(!vb)); }
     }};
 }
 
 macro_rules! shiftop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
-        let vb = unsafe { $vm.scalar(b)?.$field };
-        let vc = unsafe { $vm.scalar(c)?.$field };
-        $vm.set_scalar(a, Register::$from(vb.$method(vc as u32)))?;
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
+        // register indices and frame existence validated at compile/load time
+        let vb = unsafe { $vm.scalar_unchecked(b).$field };
+        let vc = unsafe { $vm.scalar_unchecked(c).$field };
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.$method(vc as u32))); }
     }};
 }
 
 macro_rules! loadop {
     ($vm:ident, $instr:ident, $typ:ty, $from:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        let pc = $vm.stack.current().ok_or(VMError::StackUnderflow)?.pc.wrapping_sub(1);
-        let base = unsafe { $vm.scalar(b)?.ptr };
+        let pc = $vm.stack.current_unchecked().pc.wrapping_sub(1);
+        let base = unsafe { $vm.scalar_unchecked(b).ptr };
         let addr = base
             .checked_add(c as usize)
                 .ok_or(VMError::MemoryOutOfBounds {
@@ -144,15 +153,15 @@ macro_rules! loadop {
                     addr,
                     size: size_of::<$typ>(),
                 })?;
-        $vm.set_scalar(a, Register::$from(value))?;
+        unsafe { $vm.set_scalar_unchecked(a, Register::$from(value)); }
     }};
 }
 
 macro_rules! storeop {
     ($vm:ident, $instr:ident, $field:ident, $typ:ty) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        let pc = $vm.stack.current().ok_or(VMError::StackUnderflow)?.pc.wrapping_sub(1);
-        let base = unsafe { $vm.scalar(a)?.ptr };
+        let pc = $vm.stack.current_unchecked().pc.wrapping_sub(1);
+        let base = unsafe { $vm.scalar_unchecked(a).ptr };
         let addr = base
             .checked_add(b as usize)
             .ok_or(VMError::MemoryOutOfBounds {
@@ -160,7 +169,7 @@ macro_rules! storeop {
                 addr: base,
                 size: size_of::<$typ>(),
             })?;
-        let value = unsafe { $vm.scalar(c)?.$field };
+        let value = unsafe { $vm.scalar_unchecked(c).$field };
         if !$vm.memory.write_checked::<$typ>(addr, value) {
             return Err(VMError::MemoryOutOfBounds {
                 pc,
@@ -346,12 +355,7 @@ impl Vm {
 
         loop {
             match self.step() {
-                Ok(()) => {
-                    if self.memory.needs_gc() {
-                        let roots = self.collect_roots();
-                        self.memory.collect_gc(&roots);
-                    }
-                }
+                Ok(()) => {}
                 Err(VMError::Halted) => {
                     self.stack.pop_frame();
                     self.module = None;
@@ -413,6 +417,15 @@ impl Vm {
         self.debug_hook = None;
     }
 
+    /// Execute one instruction from the current frame.
+    ///
+    /// # Safety
+    ///
+    /// Register indices and frame existence are guaranteed by the bytecode
+    /// validator at compile/load time. The validator checks that every
+    /// register operand is within the chunk's `max_registers` range and that
+    /// the call stack is non-empty during execution. Therefore, all unchecked
+    /// accesses inside this method and its macros are sound.
     pub fn step(&mut self) -> Result<(), VMError> {
         let instr = self.fetch()?;
         if let Some(ref hook) = self.debug_hook {
@@ -465,21 +478,21 @@ impl Vm {
                         let offset = self.constant_section.get(&bx)
                             .copied()
                             .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-                        self.set_scalar(instr.a(), Register::from_ptr(offset))?;
+                        unsafe { self.set_scalar_unchecked(instr.a(), Register::from_ptr(offset)); }
                     }
-                    constant => self.set_scalar(
+                    constant => unsafe { self.set_scalar_unchecked(
                         instr.a(),
                         Register {
                             bits: constant
                                 .to_bits()
                                 .expect("non-bytes constants always have scalar bits"),
                         },
-                    )?,
+                    ) },
                 }
             }
             Opcode::MOVE => {
-                let value = self.value(instr.b())?;
-                self.set_value(instr.a(), value)?;
+                let value = unsafe { self.value_unchecked(instr.b()) };
+                unsafe { self.set_value_unchecked(instr.a(), value); }
             }
 
             // SAFETY: LOAD ops read ptr (address) via union access; the compiler
@@ -667,9 +680,9 @@ impl Vm {
                 } else {
                     instr.sbx()
                 };
-                // SAFETY: scalar() returns a Register; reading u64 from any
+                // SAFETY: scalar_unchecked returns a Register; reading u64 from any
                 // Register is sound since all fields occupy the same 64 bits
-                if unsafe { self.scalar(instr.a())?.u64 } != 0 {
+                if unsafe { self.scalar_unchecked(instr.a()).u64 } != 0 {
                     self.jump(offset - 1)?;
                 }
             }
@@ -679,9 +692,9 @@ impl Vm {
                 } else {
                     instr.sbx()
                 };
-                // SAFETY: scalar() returns a Register; reading u64 from any
+                // SAFETY: scalar_unchecked returns a Register; reading u64 from any
                 // Register is sound since all fields occupy the same 64 bits
-                if unsafe { self.scalar(instr.a())?.u64 } == 0 {
+                if unsafe { self.scalar_unchecked(instr.a()).u64 } == 0 {
                     self.jump(offset - 1)?;
                 }
             }
@@ -690,27 +703,25 @@ impl Vm {
                 let dest = instr.a();
                 let idx = instr.b() as usize;
                 let closure_reg = instr.c();
-                let value = match self.value(closure_reg)? {
+                let value = match unsafe { self.value_unchecked(closure_reg) } {
                     VmValue::Closure { ref upvalues, .. } => {
                         upvalues.borrow().get(idx).cloned()
                     }
                     _ => return Err(VMError::ExpectedFunction(closure_reg)),
                 }
                 .ok_or(VMError::InvalidRegister(idx as u8))?;
-                self.set_value(dest, value)?;
+                unsafe { self.set_value_unchecked(dest, value); }
             }
             Opcode::SETUPVAL => {
                 let src = instr.a();
                 let idx = instr.b() as usize;
                 let closure_reg = instr.c();
-                let value = self.value(src)?;
+                let value = unsafe { self.value_unchecked(src) };
                 let frame = self
                     .stack
-                    .current_mut()
-                    .ok_or(VMError::StackUnderflow)?;
+                    .current_mut_unchecked();
                 let slot = frame
-                    .get_mut(closure_reg)
-                    .ok_or(VMError::InvalidRegister(closure_reg))?;
+                    .get_mut_unchecked(closure_reg);
                 match slot {
                     VmValue::Closure { upvalues, .. } => {
                         if idx >= upvalues.borrow().len() {
@@ -724,36 +735,28 @@ impl Vm {
 
             Opcode::TRY => {
                 let offset = instr.bx() as i16 as isize;
-                let handler_pc = self.stack.current()
-                    .ok_or(VMError::StackUnderflow)?
+                let handler_pc = self.stack.current_unchecked()
                     .pc.wrapping_sub(1).wrapping_add(offset as usize);
                 self.stack
-                    .current_mut()
-                    .ok_or(VMError::StackUnderflow)?
+                    .current_mut_unchecked()
                     .push_handler(handler_pc as u32);
             }
             Opcode::ENDTRY => {
                 self.stack
-                    .current_mut()
-                    .ok_or(VMError::StackUnderflow)?
+                    .current_mut_unchecked()
                     .pop_handler();
             }
             Opcode::THROW => {
-                let value = self.value(instr.a())?;
-                if let Some(handler_pc) = self
-                    .stack
-                    .current()
-                    .ok_or(VMError::StackUnderflow)?
+                let value = unsafe { self.value_unchecked(instr.a()) };
+                if let Some(handler_pc) = self.stack.current_unchecked()
                     .current_handler()
                 {
                     self.stack
-                        .current_mut()
-                        .ok_or(VMError::StackUnderflow)?
+                        .current_mut_unchecked()
                         .pc = handler_pc as usize;
-                    self.set_value(0, value)?;
+                    unsafe { self.set_value_unchecked(0, value); }
                     self.stack
-                        .current_mut()
-                        .ok_or(VMError::StackUnderflow)?
+                        .current_mut_unchecked()
                         .pop_handler();
                 } else {
                     self.stack.pop_frame();
@@ -835,7 +838,7 @@ impl Vm {
 
                 if let Some(function) = callable.as_function() {
                     let frame = self.stack.current_mut().ok_or(VMError::StackUnderflow)?;
-                    frame.chunk = function;
+                    frame.set_chunk(function);
                     frame.pc = 0;
                     for (i, arg) in args.into_iter().enumerate() {
                         frame.set(i as u8, arg);
@@ -857,7 +860,7 @@ impl Vm {
                 } else if let Some(closure) = callable.as_closure() {
                     let (chunk, _upvalues) = closure;
                     let frame = self.stack.current_mut().ok_or(VMError::StackUnderflow)?;
-                    frame.chunk = chunk.clone();
+                    frame.set_chunk(chunk.clone());
                     frame.pc = 0;
                     for (i, arg) in args.into_iter().enumerate() {
                         frame.set(i as u8, arg);
@@ -918,6 +921,18 @@ impl Vm {
             .ok_or(VMError::ExpectedScalar(register))
     }
 
+    /// SAFETY: caller must guarantee register < frame register count and the
+    /// value at register is a Scalar. Guaranteed by bytecode validator.
+    #[inline(always)]
+    pub unsafe fn scalar_unchecked(&self, register: u8) -> Register {
+        let frame = self.stack.current_unchecked();
+        let val = frame.get_unchecked(register);
+        match val {
+            VmValue::Scalar(r) => *r,
+            _ => std::hint::unreachable_unchecked(),
+        }
+    }
+
     pub fn value(&self, register: u8) -> Result<VmValue, VMError> {
         self.stack
             .current()
@@ -927,8 +942,22 @@ impl Vm {
             .ok_or(VMError::InvalidRegister(register))
     }
 
+    /// SAFETY: caller must guarantee register < frame register count.
+    /// Guaranteed by bytecode validator.
+    #[inline(always)]
+    pub unsafe fn value_unchecked(&self, register: u8) -> VmValue {
+        self.stack.current_unchecked().get_unchecked(register).clone()
+    }
+
     pub fn set_scalar(&mut self, register: u8, value: Register) -> Result<(), VMError> {
         self.set_value(register, VmValue::scalar(value))
+    }
+
+    /// SAFETY: caller must guarantee register < frame register count.
+    /// Guaranteed by bytecode validator.
+    #[inline(always)]
+    pub unsafe fn set_scalar_unchecked(&mut self, register: u8, value: Register) {
+        self.set_value_unchecked(register, VmValue::scalar(value));
     }
 
     pub fn set_value(&mut self, register: u8, value: VmValue) -> Result<(), VMError> {
@@ -938,6 +967,13 @@ impl Vm {
         } else {
             Err(VMError::InvalidRegister(register))
         }
+    }
+
+    /// SAFETY: caller must guarantee register < frame register count.
+    /// Guaranteed by bytecode validator.
+    #[inline(always)]
+    pub unsafe fn set_value_unchecked(&mut self, register: u8, value: VmValue) {
+        self.stack.current_mut_unchecked().set_unchecked(register, value);
     }
 
     pub fn collect_roots(&self) -> Vec<usize> {
@@ -955,15 +991,14 @@ impl Vm {
 
     fn fetch(&self) -> Result<Instruction, VMError> {
         let frame = self.stack.current().ok_or(VMError::StackUnderflow)?;
-        frame
-            .chunk
-            .code
-            .get(frame.pc)
-            .copied()
-            .ok_or(VMError::InvalidProgramCounter {
+        if frame.pc >= frame.code_len {
+            return Err(VMError::InvalidProgramCounter {
                 pc: frame.pc,
-                len: frame.chunk.code.len(),
-            })
+                len: frame.code_len,
+            });
+        }
+        // SAFETY: bounds checked above
+        Ok(unsafe { *frame.code_ptr.add(frame.pc) })
     }
 
     fn module(&self) -> Result<&Module, VMError> {

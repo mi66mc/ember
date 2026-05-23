@@ -117,31 +117,41 @@ fn scalar_arg(args: &[VmValue], name: &str) -> Result<Register, NativeError> {
         .ok_or_else(|| NativeError::new(format!("{name} expects a scalar argument")))
 }
 
+#[inline(always)]
+unsafe fn scalar_arg_unchecked(args: &[VmValue]) -> Register {
+    args.get_unchecked(0).as_scalar().unwrap_unchecked()
+}
+
+#[inline(always)]
+unsafe fn scalar_arg_at_unchecked(args: &[VmValue], idx: usize) -> Register {
+    args.get_unchecked(idx).as_scalar().unwrap_unchecked()
+}
+
 fn print_i64(args: &[VmValue]) -> NativeResult {
     // SAFETY: per file-level contract, CALL passes arguments matching the
     // expected type; reading i64 from the Register is sound
-    let value = unsafe { scalar_arg(args, "io.print_i64")?.i64 };
+    let value = unsafe { scalar_arg_unchecked(args).i64 };
     println!("{value}");
     Ok(Vec::new())
 }
 
 fn print_u64(args: &[VmValue]) -> NativeResult {
     // SAFETY: see file-level safety contract
-    let value = unsafe { scalar_arg(args, "io.print_u64")?.u64 };
+    let value = unsafe { scalar_arg_unchecked(args).u64 };
     println!("{value}");
     Ok(Vec::new())
 }
 
 fn print_f64(args: &[VmValue]) -> NativeResult {
     // SAFETY: see file-level safety contract
-    let value = unsafe { scalar_arg(args, "io.print_f64")?.f64 };
+    let value = unsafe { scalar_arg_unchecked(args).f64 };
     println!("{value}");
     Ok(Vec::new())
 }
 
 fn print_bool(args: &[VmValue]) -> NativeResult {
     // SAFETY: see file-level safety contract; reading u64 is always sound
-    let value = unsafe { scalar_arg(args, "io.print_bool")?.u64 != 0 };
+    let value = unsafe { scalar_arg_unchecked(args).u64 != 0 };
     println!("{value}");
     Ok(Vec::new())
 }
@@ -152,31 +162,17 @@ fn print_mem(args: &[VmValue], memory: &Memory) -> NativeResult {
     }
     // SAFETY: see file-level safety contract; pointer arguments are written
     // via from_ptr / from_u64 by the compiler
-    let ptr = unsafe {
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("io.print_mem: ptr must be scalar"))?
-            .ptr
-    };
-    let len = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("io.print_mem: len must be scalar"))?
-            .u64 as usize
-    };
+    let ptr = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
+    let len = unsafe { scalar_arg_at_unchecked(args, 1).u64 as usize };
     if ptr + len > memory.size() {
         return Err(NativeError::new("io.print_mem: out of bounds"));
     }
     // SAFETY: bounds check above ensures ptr..ptr+len is within the Vec<u8>
-    // allocation; the memory is never freed while the VM runs
+    // allocation; the memory is never freed while the VM runs.
+    // Bytes come from compiler-provided string constants (already valid UTF-8).
     let bytes = unsafe { std::slice::from_raw_parts(memory.as_ptr().add(ptr), len) };
-    match std::str::from_utf8(bytes) {
-        Ok(s) => println!("{s}"),
-        Err(_) => {
-            let s = String::from_utf8_lossy(bytes);
-            println!("{s}");
-        }
-    }
+    let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+    println!("{s}");
     Ok(Vec::new())
 }
 
@@ -228,31 +224,21 @@ pub fn std_linker() -> NativeLinker {
 }
 
 fn malloc_native(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+    if args.is_empty() {
+        return Err(NativeError::new("core.malloc expects 1 argument (size)"));
+    }
     // SAFETY: see file-level safety contract; the size argument was written
     // via from_u64 by the compiler
-    let size = unsafe {
-        if args.is_empty() {
-            return Err(NativeError::new("core.malloc expects 1 argument (size)"));
-        }
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.malloc expects a scalar argument"))?
-            .u64 as usize
-    };
+    let size = unsafe { scalar_arg_unchecked(args).u64 as usize };
     let ptr = memory.malloc(size);
     Ok(vec![VmValue::scalar(Register::from_ptr(ptr))])
 }
 
 fn free_native(args: &[VmValue], memory: &mut Memory) -> NativeResult {
-    let ptr = unsafe {
-        if args.is_empty() {
-            return Err(NativeError::new("core.free expects 1 argument (ptr)"));
-        }
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.free expects a scalar argument"))?
-            .ptr
-    };
+    if args.is_empty() {
+        return Err(NativeError::new("core.free expects 1 argument (ptr)"));
+    }
+    let ptr = unsafe { scalar_arg_unchecked(args).ptr };
     memory.free_malloc(ptr);
     Ok(Vec::new())
 }
@@ -263,24 +249,9 @@ fn memcpy(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     }
     // SAFETY: see file-level safety contract; pointer arguments are written
     // via from_ptr by the compiler
-    let dst = unsafe {
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.memcpy: dst must be scalar"))?
-            .ptr
-    };
-    let src = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.memcpy: src must be scalar"))?
-            .ptr
-    };
-    let len = unsafe {
-        args[2]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.memcpy: len must be scalar"))?
-            .ptr
-    };
+    let dst = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
+    let src = unsafe { scalar_arg_at_unchecked(args, 1).ptr };
+    let len = unsafe { scalar_arg_at_unchecked(args, 2).ptr };
     if src + len > memory.size() || dst + len > memory.size() {
         return Err(NativeError::new("core.memcpy: out of bounds"));
     }
@@ -301,24 +272,9 @@ fn memset(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     }
     // SAFETY: see file-level safety contract; pointer arguments are written
     // via from_ptr / from_u8 by the compiler
-    let dst = unsafe {
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.memset: dst must be scalar"))?
-            .ptr
-    };
-    let byte = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.memset: byte must be scalar"))?
-            .u8
-    };
-    let len = unsafe {
-        args[2]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.memset: len must be scalar"))?
-            .ptr
-    };
+    let dst = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
+    let byte = unsafe { scalar_arg_at_unchecked(args, 1).u8 };
+    let len = unsafe { scalar_arg_at_unchecked(args, 2).ptr };
     if dst + len > memory.size() {
         return Err(NativeError::new("core.memset: out of bounds"));
     }
@@ -338,18 +294,8 @@ fn alloc_gc(args: &[VmValue], memory: &mut Memory) -> NativeResult {
             "core.alloc_gc expects 2 arguments (type_tag, size)",
         ));
     }
-    let type_tag = unsafe {
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.alloc_gc: type_tag must be scalar"))?
-            .u8
-    };
-    let size = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("core.alloc_gc: size must be scalar"))?
-            .u64 as usize
-    };
+    let type_tag = unsafe { scalar_arg_at_unchecked(args, 0).u8 };
+    let size = unsafe { scalar_arg_at_unchecked(args, 1).u64 as usize };
     let ptr = memory.alloc_managed(type_tag, size, &[]);
     Ok(vec![VmValue::scalar(Register::from_ptr(ptr))])
 }
@@ -404,13 +350,13 @@ impl NativeModule for Core {
 
 fn sqrt_f64(args: &[VmValue]) -> NativeResult {
     // SAFETY: see file-level safety contract; CALL passes f64 argument
-    let value = unsafe { scalar_arg(args, "math.sqrt")?.f64 };
+    let value = unsafe { scalar_arg_unchecked(args).f64 };
     Ok(vec![VmValue::scalar(Register::from_f64(value.sqrt()))])
 }
 
 fn abs_i64(args: &[VmValue]) -> NativeResult {
     // SAFETY: see file-level safety contract; CALL passes i64 argument
-    let value = unsafe { scalar_arg(args, "math.abs_i64")?.i64 };
+    let value = unsafe { scalar_arg_unchecked(args).i64 };
     Ok(vec![VmValue::scalar(Register::from_i64(value.abs()))])
 }
 
@@ -467,24 +413,9 @@ fn fs_open(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
         ));
     }
     // SAFETY: see file-level safety contract
-    let path_ptr = unsafe {
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("fs.open: path_ptr must be scalar"))?
-            .ptr
-    };
-    let path_len = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("fs.open: path_len must be scalar"))?
-            .u64 as usize
-    };
-    let mode = unsafe {
-        args[2]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("fs.open: mode must be scalar"))?
-            .i64
-    };
+    let path_ptr = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
+    let path_len = unsafe { scalar_arg_at_unchecked(args, 1).u64 as usize };
+    let mode = unsafe { scalar_arg_at_unchecked(args, 2).i64 };
 
     if path_ptr + path_len > memory.size() {
         return Err(NativeError::new("fs.open: path out of bounds"));
@@ -520,24 +451,14 @@ fn fs_open(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
 }
 
 fn fs_read(args: &[VmValue], memory: &mut Memory, fs: &Fs) -> NativeResult {
-    let fd = unsafe { scalar_arg(args, "fs.read")?.i64 };
     if args.len() < 3 {
         return Err(NativeError::new(
             "fs.read expects 3 arguments (fd, buf_ptr, len)",
         ));
     }
-    let buf_ptr = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("fs.read: buf_ptr must be scalar"))?
-            .ptr
-    };
-    let len = unsafe {
-        args[2]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("fs.read: len must be scalar"))?
-            .u64 as usize
-    };
+    let fd = unsafe { scalar_arg_at_unchecked(args, 0).i64 };
+    let buf_ptr = unsafe { scalar_arg_at_unchecked(args, 1).ptr };
+    let len = unsafe { scalar_arg_at_unchecked(args, 2).u64 as usize };
 
     if buf_ptr + len > memory.size() {
         return Err(NativeError::new("fs.read: buffer out of bounds"));
@@ -558,24 +479,14 @@ fn fs_read(args: &[VmValue], memory: &mut Memory, fs: &Fs) -> NativeResult {
 }
 
 fn fs_write(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
-    let fd = unsafe { scalar_arg(args, "fs.write")?.i64 };
     if args.len() < 3 {
         return Err(NativeError::new(
             "fs.write expects 3 arguments (fd, buf_ptr, len)",
         ));
     }
-    let buf_ptr = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("fs.write: buf_ptr must be scalar"))?
-            .ptr
-    };
-    let len = unsafe {
-        args[2]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("fs.write: len must be scalar"))?
-            .u64 as usize
-    };
+    let fd = unsafe { scalar_arg_at_unchecked(args, 0).i64 };
+    let buf_ptr = unsafe { scalar_arg_at_unchecked(args, 1).ptr };
+    let len = unsafe { scalar_arg_at_unchecked(args, 2).u64 as usize };
 
     if buf_ptr + len > memory.size() {
         return Err(NativeError::new("fs.write: buffer out of bounds"));
@@ -595,7 +506,7 @@ fn fs_write(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
 }
 
 fn fs_close(args: &[VmValue], fs: &Fs) -> NativeResult {
-    let fd = unsafe { scalar_arg(args, "fs.close")?.i64 };
+    let fd = unsafe { scalar_arg_unchecked(args).i64 };
     let mut files = fs.files.lock().unwrap();
     if files.remove(&fd).is_some() {
         Ok(vec![VmValue::scalar(Register::from_i64(0))])
@@ -648,7 +559,7 @@ fn time_now(_args: &[VmValue]) -> NativeResult {
 
 fn time_sleep(args: &[VmValue]) -> NativeResult {
     // SAFETY: see file-level safety contract
-    let ms = unsafe { scalar_arg(args, "time.sleep")?.i64 };
+    let ms = unsafe { scalar_arg_unchecked(args).i64 };
     std::thread::sleep(std::time::Duration::from_millis(ms as u64));
     Ok(Vec::new())
 }
@@ -717,18 +628,8 @@ fn rng_range(state: &Mutex<u64>, args: &[VmValue]) -> NativeResult {
         ));
     }
     // SAFETY: see file-level safety contract
-    let min = unsafe {
-        args[0]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("rand.range: min must be scalar"))?
-            .i64
-    };
-    let max = unsafe {
-        args[1]
-            .as_scalar()
-            .ok_or_else(|| NativeError::new("rand.range: max must be scalar"))?
-            .i64
-    };
+    let min = unsafe { scalar_arg_at_unchecked(args, 0).i64 };
+    let max = unsafe { scalar_arg_at_unchecked(args, 1).i64 };
     if min > max {
         return Err(NativeError::new("rand.range: min > max"));
     }

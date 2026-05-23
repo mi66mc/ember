@@ -1,18 +1,21 @@
 use std::rc::Rc;
 
-use crate::bytecode::Chunk;
+use crate::bytecode::{Chunk, Instruction};
 use crate::vm::register::{Register, VmValue};
 
 pub const MAX_REGISTERS: u8 = 64;
 
 pub struct Frame {
     pub(crate) chunk: Rc<Chunk>,
+    pub(crate) code_ptr: *const Instruction,
+    pub(crate) code_len: usize,
     pub(crate) pc: usize,
     pub(crate) registers: Box<[VmValue]>,
     pub(crate) return_base: Option<u8>,
     pub(crate) expected_returns: u8,
     pub(crate) function_name: String,
     pub(crate) handlers: Vec<u32>,
+    pub(crate) root_mask: u64,
 }
 
 impl Frame {
@@ -24,16 +27,27 @@ impl Frame {
         Self::new(chunk, Some(return_base), expected_returns, name)
     }
 
+    pub fn set_chunk(&mut self, chunk: Rc<Chunk>) {
+        self.code_ptr = chunk.code.as_ptr();
+        self.code_len = chunk.code.len();
+        self.chunk = chunk;
+    }
+
     fn new(chunk: Rc<Chunk>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
         let num_regs = chunk.max_registers as usize;
+        let code_ptr = chunk.code.as_ptr();
+        let code_len = chunk.code.len();
         Frame {
             chunk,
+            code_ptr,
+            code_len,
             pc: 0,
             registers: vec![VmValue::default(); num_regs].into_boxed_slice(),
             return_base,
             expected_returns,
             function_name: name.into(),
             handlers: Vec::new(),
+            root_mask: 0,
         }
     }
 
@@ -53,6 +67,13 @@ impl Frame {
         self.registers.get(idx as usize)
     }
 
+    /// SAFETY: caller must guarantee idx < self.registers.len().
+    /// Guaranteed by the bytecode validator at compile time.
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, idx: u8) -> &VmValue {
+        self.registers.get_unchecked(idx as usize)
+    }
+
     pub fn set(&mut self, idx: u8, value: VmValue) -> bool {
         if let Some(slot) = self.registers.get_mut(idx as usize) {
             *slot = value;
@@ -62,8 +83,22 @@ impl Frame {
         }
     }
 
+    /// SAFETY: caller must guarantee idx < self.registers.len().
+    /// Guaranteed by the bytecode validator at compile time.
+    #[inline(always)]
+    pub unsafe fn set_unchecked(&mut self, idx: u8, value: VmValue) {
+        *self.registers.get_unchecked_mut(idx as usize) = value;
+    }
+
     pub fn get_mut(&mut self, idx: u8) -> Option<&mut VmValue> {
         self.registers.get_mut(idx as usize)
+    }
+
+    /// SAFETY: caller must guarantee idx < self.registers.len().
+    /// Guaranteed by the bytecode validator at compile time.
+    #[inline(always)]
+    pub unsafe fn get_mut_unchecked(&mut self, idx: u8) -> &mut VmValue {
+        self.registers.get_unchecked_mut(idx as usize)
     }
 
     pub fn get_scalar(&self, idx: u8) -> Option<Register> {
@@ -130,8 +165,21 @@ impl CallStack {
         self.frames.last()
     }
 
+    /// SAFETY: caller must guarantee the stack is non-empty.
+    #[inline(always)]
+    pub unsafe fn current_unchecked(&self) -> &Frame {
+        self.frames.get_unchecked(self.frames.len() - 1)
+    }
+
     pub fn current_mut(&mut self) -> Option<&mut Frame> {
         self.frames.last_mut()
+    }
+
+    /// SAFETY: caller must guarantee the stack is non-empty.
+    #[inline(always)]
+    pub unsafe fn current_mut_unchecked(&mut self) -> &mut Frame {
+        let len = self.frames.len();
+        self.frames.get_unchecked_mut(len - 1)
     }
 
     pub fn depth(&self) -> usize {

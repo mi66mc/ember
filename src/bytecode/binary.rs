@@ -122,10 +122,10 @@ fn encode_chunk(out: &mut Vec<u8>, chunk: &Chunk) -> Result<(), BinaryError> {
     out.push(chunk.max_registers);
     write_u32(out, chunk.code.len() as u32)?;
     for instr in &chunk.code {
-        out.push(instr.opcode().to_byte());
-        out.push(instr.a());
-        out.push(instr.b());
-        out.push(instr.c());
+        out.push(instr.opcode_byte);
+        out.push(instr.a);
+        out.push(instr.b);
+        out.push(instr.c);
     }
     Ok(())
 }
@@ -136,12 +136,11 @@ fn decode_chunk(reader: &mut Reader<'_>) -> Result<Chunk, BinaryError> {
     let code_count = reader.read_u32()? as usize;
     for _ in 0..code_count {
         let opcode_byte = reader.read_u8()?;
-        let opcode =
-            Opcode::from_byte(opcode_byte).ok_or(BinaryError::InvalidOpcode(opcode_byte))?;
         let a = reader.read_u8()?;
         let b = reader.read_u8()?;
         let c = reader.read_u8()?;
-        chunk.code.push(Instruction::new(opcode, [a, b, c]));
+        Opcode::from_byte(opcode_byte).ok_or(BinaryError::InvalidOpcode(opcode_byte))?;
+        chunk.code.push(Instruction { opcode_byte, a, b, c });
     }
     Ok(chunk)
 }
