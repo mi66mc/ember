@@ -434,6 +434,9 @@ impl Vm {
             Opcode::STORE_F32 => storeop!(self, instr, f32, f32),
             Opcode::STORE_F64 => storeop!(self, instr, f64, f64),
 
+            // SAFETY: ADD/SUB/MUL/DIV/MOD ops read typed fields matching their
+            // opcode; the compiler emits these only when registers hold the
+            // corresponding type (written via from_* constructors)
             Opcode::ADD_I8 => scalar_binop!(self, instr, i8, from_i8, wrapping_add),
             Opcode::ADD_I16 => scalar_binop!(self, instr, i16, from_i16, wrapping_add),
             Opcode::ADD_I32 => scalar_binop!(self, instr, i32, from_i32, wrapping_add),

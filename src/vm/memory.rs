@@ -96,6 +96,7 @@ impl Memory {
 
     pub fn read_checked<T: Copy>(&self, addr: usize) -> Option<T> {
         if addr + size_of::<T>() <= self.data.len() {
+            // SAFETY: bounds check above guarantees the read is within allocation
             Some(unsafe { self.read(addr) })
         } else {
             None
@@ -104,6 +105,7 @@ impl Memory {
 
     pub fn write_checked<T: Copy>(&mut self, addr: usize, val: T) -> bool {
         if addr + size_of::<T>() <= self.data.len() {
+            // SAFETY: bounds check above guarantees the write is within allocation
             unsafe { self.write(addr, val) };
             true
         } else {

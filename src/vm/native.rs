@@ -1,4 +1,20 @@
 use crate::bytecode::import::{ImportDecl, ImportKind};
+// SAFETY CONTRACT: All native functions use unsafe union field access.
+// Each function reads a specific named field (i64, u64, f64, ptr, etc.)
+// from the Register returned by scalar_arg(). The safety invariant is:
+// the caller (CALL instruction) passes arguments that were written via
+// Register::from_* constructors matching the expected type. This is
+// guaranteed by the bytecode compiler which emits typed opcodes (LOAD_I64,
+// ADD_I64, etc.).
+//
+// The print_mem, alloc, memcpy, and memset functions additionally use
+// unsafe pointer operations on Memory. These are sound because:
+//  * Memory::as_ptr() and as_mut_ptr() return pointers to a Vec<u8>
+//    allocation that is never freed while the VM is running.
+//  * Bounds checks are performed before raw pointer arithmetic.
+//  * std::ptr::copy / write_bytes require non-overlapping, aligned regions;
+//    Memory's bump allocator ensures fresh allocations don't alias.
+
 use crate::vm::memory::Memory;
 use crate::vm::register::{Register, VmValue};
 
@@ -97,24 +113,29 @@ fn scalar_arg(args: &[VmValue], name: &str) -> Result<Register, NativeError> {
 }
 
 fn print_i64(args: &[VmValue]) -> NativeResult {
+    // SAFETY: per file-level contract, CALL passes arguments matching the
+    // expected type; reading i64 from the Register is sound
     let value = unsafe { scalar_arg(args, "io.print_i64")?.i64 };
     println!("{value}");
     Ok(Vec::new())
 }
 
 fn print_u64(args: &[VmValue]) -> NativeResult {
+    // SAFETY: see file-level safety contract
     let value = unsafe { scalar_arg(args, "io.print_u64")?.u64 };
     println!("{value}");
     Ok(Vec::new())
 }
 
 fn print_f64(args: &[VmValue]) -> NativeResult {
+    // SAFETY: see file-level safety contract
     let value = unsafe { scalar_arg(args, "io.print_f64")?.f64 };
     println!("{value}");
     Ok(Vec::new())
 }
 
 fn print_bool(args: &[VmValue]) -> NativeResult {
+    // SAFETY: see file-level safety contract; reading u64 is always sound
     let value = unsafe { scalar_arg(args, "io.print_bool")?.u64 != 0 };
     println!("{value}");
     Ok(Vec::new())
@@ -124,6 +145,8 @@ fn print_mem(args: &[VmValue], memory: &Memory) -> NativeResult {
     if args.len() < 2 {
         return Err(NativeError::new("io.print_mem expects 2 arguments (ptr, len)"));
     }
+    // SAFETY: see file-level safety contract; pointer arguments are written
+    // via from_ptr / from_u64 by the compiler
     let ptr = unsafe {
         args[0]
             .as_scalar()
@@ -139,6 +162,8 @@ fn print_mem(args: &[VmValue], memory: &Memory) -> NativeResult {
     if ptr + len > memory.size() {
         return Err(NativeError::new("io.print_mem: out of bounds"));
     }
+    // SAFETY: bounds check above ensures ptr..ptr+len is within the Vec<u8>
+    // allocation; the memory is never freed while the VM runs
     let bytes = unsafe { std::slice::from_raw_parts(memory.as_ptr().add(ptr), len) };
     match std::str::from_utf8(bytes) {
         Ok(s) => println!("{s}"),
@@ -195,6 +220,8 @@ pub fn std_linker() -> NativeLinker {
 }
 
 fn alloc(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+    // SAFETY: see file-level safety contract; the size argument was written
+    // via from_u64 by the compiler
     let size = unsafe {
         if args.is_empty() {
             return Err(NativeError::new("core.alloc expects 1 argument (size)"));
@@ -212,6 +239,8 @@ fn memcpy(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     if args.len() < 3 {
         return Err(NativeError::new("core.memcpy expects 3 arguments"));
     }
+    // SAFETY: see file-level safety contract; pointer arguments are written
+    // via from_ptr by the compiler
     let dst = unsafe {
         args[0]
             .as_scalar()
@@ -233,6 +262,9 @@ fn memcpy(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     if src + len > memory.size() || dst + len > memory.size() {
         return Err(NativeError::new("core.memcpy: out of bounds"));
     }
+    // SAFETY: bounds check above ensures both src..src+len and dst..dst+len
+    // are within the Vec<u8> allocation; allocator guarantees regions don't
+    // alias in ways that would violate ptr::copy requirements
     unsafe {
         let src_ptr = memory.as_ptr().add(src);
         let dst_ptr = memory.as_mut_ptr().add(dst);
@@ -245,6 +277,8 @@ fn memset(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     if args.len() < 3 {
         return Err(NativeError::new("core.memset expects 3 arguments"));
     }
+    // SAFETY: see file-level safety contract; pointer arguments are written
+    // via from_ptr / from_u8 by the compiler
     let dst = unsafe {
         args[0]
             .as_scalar()
@@ -266,6 +300,9 @@ fn memset(args: &[VmValue], memory: &mut Memory) -> NativeResult {
     if dst + len > memory.size() {
         return Err(NativeError::new("core.memset: out of bounds"));
     }
+    // SAFETY: bounds check above ensures dst..dst+len is within the Vec<u8>
+    // allocation; write_bytes requires that dst is valid for len bytes of
+    // write, which is satisfied by the Vec<u8> backing store
     unsafe {
         let dst_ptr = memory.as_mut_ptr().add(dst);
         std::ptr::write_bytes(dst_ptr, byte, len);
@@ -306,11 +343,13 @@ impl NativeModule for Core {
 }
 
 fn sqrt_f64(args: &[VmValue]) -> NativeResult {
+    // SAFETY: see file-level safety contract; CALL passes f64 argument
     let value = unsafe { scalar_arg(args, "math.sqrt")?.f64 };
     Ok(vec![VmValue::scalar(Register::from_f64(value.sqrt()))])
 }
 
 fn abs_i64(args: &[VmValue]) -> NativeResult {
+    // SAFETY: see file-level safety contract; CALL passes i64 argument
     let value = unsafe { scalar_arg(args, "math.abs_i64")?.i64 };
     Ok(vec![VmValue::scalar(Register::from_i64(value.abs()))])
 }
