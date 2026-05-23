@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use crate::bytecode::{
     Callable, Chunk, Constant, Function, Instruction, Module, Opcode, ValueType,
@@ -9,14 +10,192 @@ use crate::vm::native::{NativeError, NativeLinker};
 use crate::vm::register::{Register, VmValue};
 use crate::vm::stack::{CallStack, Frame};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DebugAction {
-    Continue,
-    Step,
-    Break,
-}
+// Token-threaded dispatch: each opcode handler is a standalone function.
+// The main loop fetches the opcode byte, indexes the table, and calls the handler.
+type OpHandler = fn(&mut Vm, Instruction, u32) -> Result<(), VMError>;
 
-pub type DebugHook = Box<dyn Fn(&Frame, usize, Option<u32>) -> DebugAction + Send>;
+static DISPATCH: OnceLock<[OpHandler; 256]> = OnceLock::new();
+
+fn dispatch_table() -> &'static [OpHandler; 256] {
+    DISPATCH.get_or_init(|| {
+        let mut table: [OpHandler; 256] = [op_halt as OpHandler; 256];
+        table[Opcode::LOADK as usize] = op_loadk;
+        table[Opcode::MOVE as usize] = op_move;
+        table[Opcode::LOAD_I8 as usize] = op_load_i8;
+        table[Opcode::LOAD_I16 as usize] = op_load_i16;
+        table[Opcode::LOAD_I32 as usize] = op_load_i32;
+        table[Opcode::LOAD_I64 as usize] = op_load_i64;
+        table[Opcode::LOAD_U8 as usize] = op_load_u8;
+        table[Opcode::LOAD_U16 as usize] = op_load_u16;
+        table[Opcode::LOAD_U32 as usize] = op_load_u32;
+        table[Opcode::LOAD_U64 as usize] = op_load_u64;
+        table[Opcode::LOAD_F32 as usize] = op_load_f32;
+        table[Opcode::LOAD_F64 as usize] = op_load_f64;
+        table[Opcode::STORE_I8 as usize] = op_store_i8;
+        table[Opcode::STORE_I16 as usize] = op_store_i16;
+        table[Opcode::STORE_I32 as usize] = op_store_i32;
+        table[Opcode::STORE_I64 as usize] = op_store_i64;
+        table[Opcode::STORE_U8 as usize] = op_store_u8;
+        table[Opcode::STORE_U16 as usize] = op_store_u16;
+        table[Opcode::STORE_U32 as usize] = op_store_u32;
+        table[Opcode::STORE_U64 as usize] = op_store_u64;
+        table[Opcode::STORE_F32 as usize] = op_store_f32;
+        table[Opcode::STORE_F64 as usize] = op_store_f64;
+        table[Opcode::ADD_I8 as usize] = op_add_i8;
+        table[Opcode::ADD_I16 as usize] = op_add_i16;
+        table[Opcode::ADD_I32 as usize] = op_add_i32;
+        table[Opcode::ADD_I64 as usize] = op_add_i64;
+        table[Opcode::SUB_I8 as usize] = op_sub_i8;
+        table[Opcode::SUB_I16 as usize] = op_sub_i16;
+        table[Opcode::SUB_I32 as usize] = op_sub_i32;
+        table[Opcode::SUB_I64 as usize] = op_sub_i64;
+        table[Opcode::MUL_I8 as usize] = op_mul_i8;
+        table[Opcode::MUL_I16 as usize] = op_mul_i16;
+        table[Opcode::MUL_I32 as usize] = op_mul_i32;
+        table[Opcode::MUL_I64 as usize] = op_mul_i64;
+        table[Opcode::DIV_I8 as usize] = op_div_i8;
+        table[Opcode::DIV_I16 as usize] = op_div_i16;
+        table[Opcode::DIV_I32 as usize] = op_div_i32;
+        table[Opcode::DIV_I64 as usize] = op_div_i64;
+        table[Opcode::MOD_I8 as usize] = op_mod_i8;
+        table[Opcode::MOD_I16 as usize] = op_mod_i16;
+        table[Opcode::MOD_I32 as usize] = op_mod_i32;
+        table[Opcode::MOD_I64 as usize] = op_mod_i64;
+        table[Opcode::NEG_I8 as usize] = op_neg_i8;
+        table[Opcode::NEG_I16 as usize] = op_neg_i16;
+        table[Opcode::NEG_I32 as usize] = op_neg_i32;
+        table[Opcode::NEG_I64 as usize] = op_neg_i64;
+        table[Opcode::ADD_U8 as usize] = op_add_u8;
+        table[Opcode::ADD_U16 as usize] = op_add_u16;
+        table[Opcode::ADD_U32 as usize] = op_add_u32;
+        table[Opcode::ADD_U64 as usize] = op_add_u64;
+        table[Opcode::SUB_U8 as usize] = op_sub_u8;
+        table[Opcode::SUB_U16 as usize] = op_sub_u16;
+        table[Opcode::SUB_U32 as usize] = op_sub_u32;
+        table[Opcode::SUB_U64 as usize] = op_sub_u64;
+        table[Opcode::MUL_U8 as usize] = op_mul_u8;
+        table[Opcode::MUL_U16 as usize] = op_mul_u16;
+        table[Opcode::MUL_U32 as usize] = op_mul_u32;
+        table[Opcode::MUL_U64 as usize] = op_mul_u64;
+        table[Opcode::DIV_U8 as usize] = op_div_u8;
+        table[Opcode::DIV_U16 as usize] = op_div_u16;
+        table[Opcode::DIV_U32 as usize] = op_div_u32;
+        table[Opcode::DIV_U64 as usize] = op_div_u64;
+        table[Opcode::MOD_U8 as usize] = op_mod_u8;
+        table[Opcode::MOD_U16 as usize] = op_mod_u16;
+        table[Opcode::MOD_U32 as usize] = op_mod_u32;
+        table[Opcode::MOD_U64 as usize] = op_mod_u64;
+        table[Opcode::ADD_F32 as usize] = op_add_f32;
+        table[Opcode::ADD_F64 as usize] = op_add_f64;
+        table[Opcode::SUB_F32 as usize] = op_sub_f32;
+        table[Opcode::SUB_F64 as usize] = op_sub_f64;
+        table[Opcode::MUL_F32 as usize] = op_mul_f32;
+        table[Opcode::MUL_F64 as usize] = op_mul_f64;
+        table[Opcode::DIV_F32 as usize] = op_div_f32;
+        table[Opcode::DIV_F64 as usize] = op_div_f64;
+        table[Opcode::NEG_F32 as usize] = op_neg_f32;
+        table[Opcode::NEG_F64 as usize] = op_neg_f64;
+        table[Opcode::AND_I8 as usize] = op_and_i8;
+        table[Opcode::AND_I16 as usize] = op_and_i16;
+        table[Opcode::AND_I32 as usize] = op_and_i32;
+        table[Opcode::AND_I64 as usize] = op_and_i64;
+        table[Opcode::OR_I8 as usize] = op_or_i8;
+        table[Opcode::OR_I16 as usize] = op_or_i16;
+        table[Opcode::OR_I32 as usize] = op_or_i32;
+        table[Opcode::OR_I64 as usize] = op_or_i64;
+        table[Opcode::XOR_I8 as usize] = op_xor_i8;
+        table[Opcode::XOR_I16 as usize] = op_xor_i16;
+        table[Opcode::XOR_I32 as usize] = op_xor_i32;
+        table[Opcode::XOR_I64 as usize] = op_xor_i64;
+        table[Opcode::NOT_I8 as usize] = op_not_i8;
+        table[Opcode::NOT_I16 as usize] = op_not_i16;
+        table[Opcode::NOT_I32 as usize] = op_not_i32;
+        table[Opcode::NOT_I64 as usize] = op_not_i64;
+        table[Opcode::SHL_I8 as usize] = op_shl_i8;
+        table[Opcode::SHL_I16 as usize] = op_shl_i16;
+        table[Opcode::SHL_I32 as usize] = op_shl_i32;
+        table[Opcode::SHL_I64 as usize] = op_shl_i64;
+        table[Opcode::SHR_I8 as usize] = op_shr_i8;
+        table[Opcode::SHR_I16 as usize] = op_shr_i16;
+        table[Opcode::SHR_I32 as usize] = op_shr_i32;
+        table[Opcode::SHR_I64 as usize] = op_shr_i64;
+        table[Opcode::USHR_I8 as usize] = op_ushr_i8;
+        table[Opcode::USHR_I16 as usize] = op_ushr_i16;
+        table[Opcode::USHR_I32 as usize] = op_ushr_i32;
+        table[Opcode::USHR_I64 as usize] = op_ushr_i64;
+        table[Opcode::EQ_I8 as usize] = op_eq_i8;
+        table[Opcode::EQ_I16 as usize] = op_eq_i16;
+        table[Opcode::EQ_I32 as usize] = op_eq_i32;
+        table[Opcode::EQ_I64 as usize] = op_eq_i64;
+        table[Opcode::NE_I8 as usize] = op_ne_i8;
+        table[Opcode::NE_I16 as usize] = op_ne_i16;
+        table[Opcode::NE_I32 as usize] = op_ne_i32;
+        table[Opcode::NE_I64 as usize] = op_ne_i64;
+        table[Opcode::LT_I8 as usize] = op_lt_i8;
+        table[Opcode::LT_I16 as usize] = op_lt_i16;
+        table[Opcode::LT_I32 as usize] = op_lt_i32;
+        table[Opcode::LT_I64 as usize] = op_lt_i64;
+        table[Opcode::LE_I8 as usize] = op_le_i8;
+        table[Opcode::LE_I16 as usize] = op_le_i16;
+        table[Opcode::LE_I32 as usize] = op_le_i32;
+        table[Opcode::LE_I64 as usize] = op_le_i64;
+        table[Opcode::GT_I8 as usize] = op_gt_i8;
+        table[Opcode::GT_I16 as usize] = op_gt_i16;
+        table[Opcode::GT_I32 as usize] = op_gt_i32;
+        table[Opcode::GT_I64 as usize] = op_gt_i64;
+        table[Opcode::GE_I8 as usize] = op_ge_i8;
+        table[Opcode::GE_I16 as usize] = op_ge_i16;
+        table[Opcode::GE_I32 as usize] = op_ge_i32;
+        table[Opcode::GE_I64 as usize] = op_ge_i64;
+        table[Opcode::LT_U8 as usize] = op_lt_u8;
+        table[Opcode::LT_U16 as usize] = op_lt_u16;
+        table[Opcode::LT_U32 as usize] = op_lt_u32;
+        table[Opcode::LT_U64 as usize] = op_lt_u64;
+        table[Opcode::LE_U8 as usize] = op_le_u8;
+        table[Opcode::LE_U16 as usize] = op_le_u16;
+        table[Opcode::LE_U32 as usize] = op_le_u32;
+        table[Opcode::LE_U64 as usize] = op_le_u64;
+        table[Opcode::GT_U8 as usize] = op_gt_u8;
+        table[Opcode::GT_U16 as usize] = op_gt_u16;
+        table[Opcode::GT_U32 as usize] = op_gt_u32;
+        table[Opcode::GT_U64 as usize] = op_gt_u64;
+        table[Opcode::GE_U8 as usize] = op_ge_u8;
+        table[Opcode::GE_U16 as usize] = op_ge_u16;
+        table[Opcode::GE_U32 as usize] = op_ge_u32;
+        table[Opcode::GE_U64 as usize] = op_ge_u64;
+        table[Opcode::EQ_F32 as usize] = op_eq_f32;
+        table[Opcode::EQ_F64 as usize] = op_eq_f64;
+        table[Opcode::NE_F32 as usize] = op_ne_f32;
+        table[Opcode::NE_F64 as usize] = op_ne_f64;
+        table[Opcode::LT_F32 as usize] = op_lt_f32;
+        table[Opcode::LT_F64 as usize] = op_lt_f64;
+        table[Opcode::LE_F32 as usize] = op_le_f32;
+        table[Opcode::LE_F64 as usize] = op_le_f64;
+        table[Opcode::GT_F32 as usize] = op_gt_f32;
+        table[Opcode::GT_F64 as usize] = op_gt_f64;
+        table[Opcode::GE_F32 as usize] = op_ge_f32;
+        table[Opcode::GE_F64 as usize] = op_ge_f64;
+        table[Opcode::JMP as usize] = op_jmp;
+        table[Opcode::JMPIF as usize] = op_jmpif;
+        table[Opcode::JMPIFNOT as usize] = op_jmpifnot;
+        table[Opcode::TRY as usize] = op_try;
+        table[Opcode::ENDTRY as usize] = op_endtry;
+        table[Opcode::THROW as usize] = op_throw;
+        table[Opcode::GETUPVAL as usize] = op_getupval;
+        table[Opcode::CLOSURE as usize] = op_closure;
+        table[Opcode::CALL as usize] = op_call;
+        table[Opcode::RET as usize] = op_ret;
+        table[Opcode::SETUPVAL as usize] = op_setupval;
+        table[Opcode::CALLTAIL as usize] = op_calltail;
+        table[Opcode::GETG as usize] = op_getg;
+        table[Opcode::SETG as usize] = op_setg;
+        table[Opcode::CONV as usize] = op_conv;
+        table[Opcode::HALT as usize] = op_halt;
+        table[Opcode::NOP as usize] = op_nop;
+        table[Opcode::EXT as usize] = op_ext;
+        table
+    })
+}
 
 // ── Safety contract for union field access in macros ──────────────
 //
@@ -133,7 +312,7 @@ macro_rules! shiftop {
     }};
 }
 
-macro_rules! loadop {
+macro_rules! load_macro {
     ($vm:ident, $instr:ident, $typ:ty, $from:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
         let pc = unsafe { $vm.stack.current_unchecked() }.pc.wrapping_sub(1);
@@ -157,7 +336,7 @@ macro_rules! loadop {
     }};
 }
 
-macro_rules! storeop {
+macro_rules! store_macro {
     ($vm:ident, $instr:ident, $field:ident, $typ:ty) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
         let pc = unsafe { $vm.stack.current_unchecked() }.pc.wrapping_sub(1);
@@ -235,6 +414,576 @@ fn convert_register(src: Register, from: ValueType, to: ValueType) -> Register {
     }
 }
 
+// ── Opcode handler functions ──────────────────────────────────────
+
+fn op_halt(_vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    Err(VMError::Halted)
+}
+
+fn op_nop(_vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    Ok(())
+}
+
+fn op_ext(_vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    Err(VMError::NativeError(
+        "unexpected EXT in execute (should have been handled by fetch)".to_string(),
+    ))
+}
+
+fn op_loadk(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
+    let bx = if ext != 0 {
+        (instr.bx() as u32 | ext) as usize
+    } else {
+        instr.bx() as usize
+    };
+    let constant = vm.module()?
+        .constants
+        .get(bx)
+        .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
+        .clone();
+    match constant {
+        Constant::Bytes(_) => {
+            let offset = vm.constant_section.get(&bx)
+                .copied()
+                .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
+            vm.set_scalar(instr.a(), Register::from_ptr(offset))?;
+        }
+        constant => vm.set_scalar(
+            instr.a(),
+            Register {
+                bits: constant
+                    .to_bits()
+                    .expect("non-bytes constants always have scalar bits"),
+            },
+        )?,
+    }
+    Ok(())
+}
+
+fn op_move(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let value = unsafe { vm.value_unchecked(instr.b()) };
+    vm.set_value(instr.a(), value)?;
+    Ok(())
+}
+
+fn op_load_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, i8, from_i8);
+    Ok(())
+}
+fn op_load_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, i16, from_i16);
+    Ok(())
+}
+fn op_load_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, i32, from_i32);
+    Ok(())
+}
+fn op_load_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, i64, from_i64);
+    Ok(())
+}
+fn op_load_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, u8, from_u8);
+    Ok(())
+}
+fn op_load_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, u16, from_u16);
+    Ok(())
+}
+fn op_load_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, u32, from_u32);
+    Ok(())
+}
+fn op_load_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, u64, from_u64);
+    Ok(())
+}
+fn op_load_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, f32, from_f32);
+    Ok(())
+}
+fn op_load_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    load_macro!(vm, instr, f64, from_f64);
+    Ok(())
+}
+
+fn op_store_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, i8, i8);
+    Ok(())
+}
+fn op_store_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, i16, i16);
+    Ok(())
+}
+fn op_store_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, i32, i32);
+    Ok(())
+}
+fn op_store_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, i64, i64);
+    Ok(())
+}
+fn op_store_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, u8, u8);
+    Ok(())
+}
+fn op_store_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, u16, u16);
+    Ok(())
+}
+fn op_store_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, u32, u32);
+    Ok(())
+}
+fn op_store_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, u64, u64);
+    Ok(())
+}
+fn op_store_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, f32, f32);
+    Ok(())
+}
+fn op_store_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    store_macro!(vm, instr, f64, f64);
+    Ok(())
+}
+
+// Signed integer arithmetic
+fn op_add_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i8, from_i8, wrapping_add); Ok(()) }
+fn op_add_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i16, from_i16, wrapping_add); Ok(()) }
+fn op_add_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i32, from_i32, wrapping_add); Ok(()) }
+fn op_add_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i64, from_i64, wrapping_add); Ok(()) }
+fn op_sub_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i8, from_i8, wrapping_sub); Ok(()) }
+fn op_sub_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i16, from_i16, wrapping_sub); Ok(()) }
+fn op_sub_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i32, from_i32, wrapping_sub); Ok(()) }
+fn op_sub_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i64, from_i64, wrapping_sub); Ok(()) }
+fn op_mul_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i8, from_i8, wrapping_mul); Ok(()) }
+fn op_mul_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i16, from_i16, wrapping_mul); Ok(()) }
+fn op_mul_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i32, from_i32, wrapping_mul); Ok(()) }
+fn op_mul_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i64, from_i64, wrapping_mul); Ok(()) }
+fn op_div_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i8, from_i8, wrapping_div); Ok(()) }
+fn op_div_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i16, from_i16, wrapping_div); Ok(()) }
+fn op_div_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i32, from_i32, wrapping_div); Ok(()) }
+fn op_div_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i64, from_i64, wrapping_div); Ok(()) }
+fn op_mod_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i8, from_i8, wrapping_rem); Ok(()) }
+fn op_mod_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i16, from_i16, wrapping_rem); Ok(()) }
+fn op_mod_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i32, from_i32, wrapping_rem); Ok(()) }
+fn op_mod_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i64, from_i64, wrapping_rem); Ok(()) }
+fn op_neg_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i8, from_i8); Ok(()) }
+fn op_neg_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i16, from_i16); Ok(()) }
+fn op_neg_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i32, from_i32); Ok(()) }
+fn op_neg_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i64, from_i64); Ok(()) }
+
+// Unsigned integer arithmetic
+fn op_add_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u8, from_u8, wrapping_add); Ok(()) }
+fn op_add_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u16, from_u16, wrapping_add); Ok(()) }
+fn op_add_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u32, from_u32, wrapping_add); Ok(()) }
+fn op_add_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u64, from_u64, wrapping_add); Ok(()) }
+fn op_sub_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u8, from_u8, wrapping_sub); Ok(()) }
+fn op_sub_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u16, from_u16, wrapping_sub); Ok(()) }
+fn op_sub_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u32, from_u32, wrapping_sub); Ok(()) }
+fn op_sub_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u64, from_u64, wrapping_sub); Ok(()) }
+fn op_mul_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u8, from_u8, wrapping_mul); Ok(()) }
+fn op_mul_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u16, from_u16, wrapping_mul); Ok(()) }
+fn op_mul_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u32, from_u32, wrapping_mul); Ok(()) }
+fn op_mul_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u64, from_u64, wrapping_mul); Ok(()) }
+fn op_div_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u8, from_u8, wrapping_div); Ok(()) }
+fn op_div_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u16, from_u16, wrapping_div); Ok(()) }
+fn op_div_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u32, from_u32, wrapping_div); Ok(()) }
+fn op_div_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u64, from_u64, wrapping_div); Ok(()) }
+fn op_mod_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u8, from_u8, wrapping_rem); Ok(()) }
+fn op_mod_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u16, from_u16, wrapping_rem); Ok(()) }
+fn op_mod_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u32, from_u32, wrapping_rem); Ok(()) }
+fn op_mod_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u64, from_u64, wrapping_rem); Ok(()) }
+
+// Float arithmetic
+fn op_add_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, +); Ok(()) }
+fn op_add_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, +); Ok(()) }
+fn op_sub_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, -); Ok(()) }
+fn op_sub_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, -); Ok(()) }
+fn op_mul_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, *); Ok(()) }
+fn op_mul_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, *); Ok(()) }
+fn op_div_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, /); Ok(()) }
+fn op_div_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, /); Ok(()) }
+fn op_neg_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_negop!(vm, instr, f32, from_f32); Ok(()) }
+fn op_neg_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_negop!(vm, instr, f64, from_f64); Ok(()) }
+
+// Bitwise ops
+fn op_and_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i8, from_i8, &); Ok(()) }
+fn op_and_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i16, from_i16, &); Ok(()) }
+fn op_and_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i32, from_i32, &); Ok(()) }
+fn op_and_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i64, from_i64, &); Ok(()) }
+fn op_or_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i8, from_i8, |); Ok(()) }
+fn op_or_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i16, from_i16, |); Ok(()) }
+fn op_or_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i32, from_i32, |); Ok(()) }
+fn op_or_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i64, from_i64, |); Ok(()) }
+fn op_xor_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i8, from_i8, ^); Ok(()) }
+fn op_xor_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i16, from_i16, ^); Ok(()) }
+fn op_xor_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i32, from_i32, ^); Ok(()) }
+fn op_xor_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i64, from_i64, ^); Ok(()) }
+fn op_not_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i8, from_i8); Ok(()) }
+fn op_not_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i16, from_i16); Ok(()) }
+fn op_not_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i32, from_i32); Ok(()) }
+fn op_not_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i64, from_i64); Ok(()) }
+fn op_shl_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i8, from_i8, wrapping_shl); Ok(()) }
+fn op_shl_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i16, from_i16, wrapping_shl); Ok(()) }
+fn op_shl_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i32, from_i32, wrapping_shl); Ok(()) }
+fn op_shl_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i64, from_i64, wrapping_shl); Ok(()) }
+fn op_shr_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i8, from_i8, wrapping_shr); Ok(()) }
+fn op_shr_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i16, from_i16, wrapping_shr); Ok(()) }
+fn op_shr_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i32, from_i32, wrapping_shr); Ok(()) }
+fn op_shr_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i64, from_i64, wrapping_shr); Ok(()) }
+fn op_ushr_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u8, from_u8, wrapping_shr); Ok(()) }
+fn op_ushr_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u16, from_u16, wrapping_shr); Ok(()) }
+fn op_ushr_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u32, from_u32, wrapping_shr); Ok(()) }
+fn op_ushr_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u64, from_u64, wrapping_shr); Ok(()) }
+
+// Signed comparisons
+fn op_eq_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, ==); Ok(()) }
+fn op_eq_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, ==); Ok(()) }
+fn op_eq_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, ==); Ok(()) }
+fn op_eq_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, ==); Ok(()) }
+fn op_ne_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, !=); Ok(()) }
+fn op_ne_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, !=); Ok(()) }
+fn op_ne_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, !=); Ok(()) }
+fn op_ne_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, !=); Ok(()) }
+fn op_lt_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, <); Ok(()) }
+fn op_lt_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, <); Ok(()) }
+fn op_lt_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, <); Ok(()) }
+fn op_lt_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, <); Ok(()) }
+fn op_le_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, <=); Ok(()) }
+fn op_le_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, <=); Ok(()) }
+fn op_le_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, <=); Ok(()) }
+fn op_le_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, <=); Ok(()) }
+fn op_gt_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, >); Ok(()) }
+fn op_gt_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, >); Ok(()) }
+fn op_gt_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, >); Ok(()) }
+fn op_gt_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, >); Ok(()) }
+fn op_ge_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, >=); Ok(()) }
+fn op_ge_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, >=); Ok(()) }
+fn op_ge_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, >=); Ok(()) }
+fn op_ge_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, >=); Ok(()) }
+
+// Unsigned comparisons
+fn op_lt_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, <); Ok(()) }
+fn op_lt_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, <); Ok(()) }
+fn op_lt_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, <); Ok(()) }
+fn op_lt_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, <); Ok(()) }
+fn op_le_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, <=); Ok(()) }
+fn op_le_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, <=); Ok(()) }
+fn op_le_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, <=); Ok(()) }
+fn op_le_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, <=); Ok(()) }
+fn op_gt_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, >); Ok(()) }
+fn op_gt_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, >); Ok(()) }
+fn op_gt_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, >); Ok(()) }
+fn op_gt_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, >); Ok(()) }
+fn op_ge_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, >=); Ok(()) }
+fn op_ge_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, >=); Ok(()) }
+fn op_ge_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, >=); Ok(()) }
+fn op_ge_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, >=); Ok(()) }
+
+// Float comparisons
+fn op_eq_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, ==); Ok(()) }
+fn op_eq_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, ==); Ok(()) }
+fn op_ne_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, !=); Ok(()) }
+fn op_ne_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, !=); Ok(()) }
+fn op_lt_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, <); Ok(()) }
+fn op_lt_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, <); Ok(()) }
+fn op_le_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, <=); Ok(()) }
+fn op_le_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, <=); Ok(()) }
+fn op_gt_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, >); Ok(()) }
+fn op_gt_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, >); Ok(()) }
+fn op_ge_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, >=); Ok(()) }
+fn op_ge_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, >=); Ok(()) }
+
+// Jumps
+fn op_jmp(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
+    let offset = if ext != 0 {
+        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32 | (ext as i32);
+        effective_offset as i16
+    } else {
+        instr.sbx_ab()
+    };
+    vm.jump(offset - 1)?;
+    Ok(())
+}
+
+fn op_jmpif(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
+    let offset = if ext != 0 {
+        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32 | (ext as i32);
+        effective_offset as i16
+    } else {
+        instr.sbx()
+    };
+    // SAFETY: scalar_unchecked returns a Register; reading u64 from any
+    // Register is sound since all fields occupy the same 64 bits
+    if unsafe { vm.scalar_unchecked(instr.a()).u64 } != 0 {
+        vm.jump(offset - 1)?;
+    }
+    Ok(())
+}
+
+fn op_jmpifnot(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
+    let offset = if ext != 0 {
+        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32 | (ext as i32);
+        effective_offset as i16
+    } else {
+        instr.sbx()
+    };
+    // SAFETY: scalar_unchecked returns a Register; reading u64 from any
+    // Register is sound since all fields occupy the same 64 bits
+    if unsafe { vm.scalar_unchecked(instr.a()).u64 } == 0 {
+        vm.jump(offset - 1)?;
+    }
+    Ok(())
+}
+
+// Exception handling
+fn op_try(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let offset = instr.bx() as i16 as isize;
+    let handler_pc = unsafe { vm.stack.current_unchecked()
+        .pc.wrapping_sub(1).wrapping_add(offset as usize) };
+    unsafe { vm.stack
+        .current_mut_unchecked()
+        .push_handler(handler_pc as u32); }
+    Ok(())
+}
+
+fn op_endtry(vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    unsafe { vm.stack
+        .current_mut_unchecked()
+        .pop_handler(); }
+    Ok(())
+}
+
+fn op_throw(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let value = unsafe { vm.value_unchecked(instr.a()) };
+    if let Some(handler_pc) = unsafe { vm.stack.current_unchecked()
+        .current_handler() }
+    {
+        unsafe {
+            vm.stack
+                .current_mut_unchecked()
+                .pc = handler_pc as usize;
+            vm.set_value_unchecked(0, value);
+        }
+        unsafe {
+            vm.stack
+                .current_mut_unchecked()
+                .pop_handler();
+        }
+    } else {
+        vm.stack.pop_frame();
+        if vm.stack.is_empty() {
+            return Err(VMError::Runtime {
+                message: "uncaught exception".to_string(),
+                backtrace: vec![],
+            });
+        }
+        return Err(VMError::Thrown(value));
+    }
+    Ok(())
+}
+
+// Upvalues
+fn op_getupval(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let dest = instr.a();
+    let idx = instr.b() as usize;
+    let closure_reg = instr.c();
+    let value = match unsafe { vm.value_unchecked(closure_reg) } {
+        VmValue::Closure { upvalues, .. } => {
+            let upvalues = unsafe { &*upvalues.get() };
+            upvalues.get(idx).cloned()
+        }
+        _ => return Err(VMError::ExpectedFunction(closure_reg)),
+    }
+    .ok_or(VMError::InvalidRegister(idx as u8))?;
+    unsafe { vm.set_value_unchecked(dest, value); }
+    Ok(())
+}
+
+fn op_setupval(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let src = instr.a();
+    let idx = instr.b() as usize;
+    let closure_reg = instr.c();
+    let value = unsafe { vm.value_unchecked(src) };
+    let frame = unsafe { vm
+        .stack
+        .current_mut_unchecked() };
+    let slot = unsafe { frame
+        .get_mut_unchecked(closure_reg) };
+    match slot {
+        VmValue::Closure { upvalues, .. } => {
+            let upvalues = unsafe { &mut *upvalues.get() };
+            if idx >= upvalues.len() {
+                return Err(VMError::InvalidRegister(idx as u8));
+            }
+            upvalues[idx] = value;
+        }
+        _ => return Err(VMError::ExpectedFunction(closure_reg)),
+    }
+    Ok(())
+}
+
+// Closure
+fn op_closure(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
+    let upvalue_count = instr.c() as usize;
+    let callable_idx = if ext != 0 {
+        (instr.b() as u32 | (ext >> 16)) as usize
+    } else {
+        instr.b() as usize
+    };
+    let closure = {
+        let module = vm.module()?;
+        match module
+            .callables
+            .get(callable_idx)
+            .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
+        {
+            Callable::Function(function_id) => {
+                let function = module
+                    .functions
+                    .get(*function_id as usize)
+                    .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
+                let mut upvalues = Vec::with_capacity(upvalue_count);
+                let frame = unsafe { vm.stack.current_unchecked() };
+                let reg_count = frame.chunk.max_registers as usize;
+                for i in 0..upvalue_count {
+                    let reg_idx = reg_count - upvalue_count + i;
+                    upvalues.push(
+                        unsafe { frame
+                            .get_unchecked(reg_idx as u8) }
+                            .clone(),
+                    );
+                }
+                VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
+            }
+            Callable::Import(import_idx) => {
+                let import_decl = module
+                    .imports
+                    .get(*import_idx as usize)
+                    .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
+                let resolved = vm
+                    .linker
+                    .resolve(import_decl)
+                    .ok_or_else(|| {
+                        VMError::UnresolvedNativeImport(import_decl.to_string())
+                    })?;
+                VmValue::native_import(resolved)
+            }
+        }
+    };
+    vm.set_value(instr.a(), closure)?;
+    Ok(())
+}
+
+// Call / Return
+fn op_call(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    vm.call(instr.a(), instr.b(), instr.c())
+}
+
+fn op_ret(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    vm.ret(instr.a(), instr.b())
+}
+
+// Tail call
+fn op_calltail(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let base = instr.a();
+    let arg_count = instr.b();
+
+    let mut args = Vec::with_capacity(arg_count as usize);
+    for index in 0..arg_count {
+        let src = base
+            .checked_add(1)
+            .and_then(|v| v.checked_add(index))
+            .ok_or(VMError::InvalidRegister(base))?;
+        args.push(unsafe { vm.value_unchecked(src) });
+    }
+
+    let callable = unsafe { vm.value_unchecked(base) };
+
+    if let Some(function) = callable.as_function() {
+        let frame = unsafe { vm.stack.current_mut_unchecked() };
+        frame.set_chunk(function);
+        frame.pc = 0;
+        for (i, arg) in args.into_iter().enumerate() {
+            unsafe { frame.set_unchecked(i as u8, arg); }
+        }
+        // Store function reference for nested CALLTAIL
+        unsafe { frame.set_unchecked(arg_count, callable); }
+    } else if let Some(idx) = callable.as_native_import() {
+        let returns = vm
+            .linker
+            .call(idx, &args, &mut vm.memory)
+            .map_err(|e| VMError::NativeError(e.message))?;
+        for (i, val) in returns.into_iter().enumerate() {
+            let tgt = base
+                .checked_add(i as u8)
+                .ok_or(VMError::InvalidRegister(base))?;
+            unsafe { vm.set_value_unchecked(tgt, val); }
+        }
+        return vm.ret(base, 0);
+    } else if let Some(closure) = callable.as_closure() {
+        let (chunk, _upvalues) = closure;
+        let frame = unsafe { vm.stack.current_mut_unchecked() };
+        frame.set_chunk(chunk.clone());
+        frame.pc = 0;
+        for (i, arg) in args.into_iter().enumerate() {
+            unsafe { frame.set_unchecked(i as u8, arg); }
+        }
+    } else {
+        return Err(VMError::ExpectedFunction(base));
+    }
+    Ok(())
+}
+
+// Globals
+fn op_getg(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let value = vm
+        .globals
+        .get(instr.bx() as usize)
+        .cloned()
+        .unwrap_or_default();
+    vm.set_value(instr.a(), value)?;
+    Ok(())
+}
+
+fn op_setg(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    const MAX_GLOBALS: usize = 256;
+    let gx = instr.bx() as usize;
+    if gx >= MAX_GLOBALS {
+        return Err(VMError::NativeError("global index out of range".to_string()));
+    }
+    let value = unsafe { vm.value_unchecked(instr.a()) };
+    if gx >= vm.globals.len() {
+        vm.globals.resize(gx + 1, VmValue::default());
+    }
+    vm.globals[gx] = value;
+    Ok(())
+}
+
+// Conversion
+fn op_conv(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
+    let from_type = instr.c() >> 4;
+    let to_type = instr.c() & 0x0F;
+    let from = ValueType::from_byte(from_type)
+        .ok_or(VMError::InvalidConversionType(from_type))?;
+    let to =
+        ValueType::from_byte(to_type).ok_or(VMError::InvalidConversionType(to_type))?;
+    let result = convert_register(unsafe { vm.scalar_unchecked(instr.b()) }, from, to);
+    vm.set_scalar(instr.a(), result)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugAction {
+    Continue,
+    Step,
+    Break,
+}
+
+pub type DebugHook = Box<dyn Fn(&Frame, usize, Option<u32>) -> DebugAction + Send>;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum VMError {
     StackUnderflow,
@@ -277,8 +1026,6 @@ pub struct Vm {
 }
 
 pub type VM = Vm;
-
-const MAX_GLOBALS: usize = 256;
 
 impl Vm {
     pub fn new(memory_size: usize) -> Self {
@@ -353,8 +1100,33 @@ impl Vm {
         self.module = Some(Rc::new(module));
         self.stack.push_entry(Rc::new(entry), entry_name);
 
+        let dispatch = dispatch_table();
+
         loop {
-            match self.step() {
+            let frame = unsafe { self.stack.current_unchecked() };
+            if frame.pc >= frame.code_len {
+                return Ok(());
+            }
+
+            // Fetch instruction, handle EXT inline
+            let mut instr = unsafe { *frame.code_ptr.add(frame.pc) };
+            let mut extended_bits: u32 = 0;
+
+            if instr.opcode_byte == Opcode::EXT as u8 {
+                let extra = ((instr.c as u16) << 8) | instr.b as u16;
+                unsafe { self.stack.current_mut_unchecked() }.pc += 1;
+                let frame = unsafe { self.stack.current_unchecked() };
+                if frame.pc >= frame.code_len {
+                    return Err(VMError::InvalidProgramCounter { pc: frame.pc, len: frame.code_len });
+                }
+                instr = unsafe { *frame.code_ptr.add(frame.pc) };
+                extended_bits = (extra as u32) << 16;
+            }
+
+            unsafe { self.stack.current_mut_unchecked() }.pc += 1;
+
+            let handler = dispatch[instr.opcode_byte as usize];
+            match handler(self, instr, extended_bits) {
                 Ok(()) => {}
                 Err(VMError::Halted) => {
                     self.stack.pop_frame();
@@ -419,15 +1191,6 @@ impl Vm {
         self.debug_hook = None;
     }
 
-    /// Execute one instruction from the current frame.
-    ///
-    /// # Safety
-    ///
-    /// Register indices and frame existence are guaranteed by the bytecode
-    /// validator at compile/load time. The validator checks that every
-    /// register operand is within the chunk's `max_registers` range and that
-    /// the call stack is non-empty during execution. Therefore, all unchecked
-    /// accesses inside this method and its macros are sound.
     pub fn step(&mut self) -> Result<(), VMError> {
         let instr = self.fetch()?;
         if let Some(ref hook) = self.debug_hook {
@@ -456,466 +1219,8 @@ impl Vm {
             instr
         };
 
-        let effective_bx = instr.bx() as u32 | extended_bits;
-        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32
-            | (extended_bits as i32);
-
-        match instr.opcode() {
-            Opcode::HALT => return Err(VMError::Halted),
-            Opcode::NOP => {}
-
-            Opcode::LOADK => {
-                let bx = if extended_bits != 0 {
-                    effective_bx as usize
-                } else {
-                    instr.bx() as usize
-                };
-                let constant = self.module()?
-                    .constants
-                    .get(bx)
-                    .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
-                    .clone();
-                match constant {
-                    Constant::Bytes(_) => {
-                        let offset = self.constant_section.get(&bx)
-                            .copied()
-                            .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-                        self.set_scalar(instr.a(), Register::from_ptr(offset))?;
-                    }
-                    constant => self.set_scalar(
-                        instr.a(),
-                        Register {
-                            bits: constant
-                                .to_bits()
-                                .expect("non-bytes constants always have scalar bits"),
-                        },
-                    )?,
-                }
-            }
-            Opcode::MOVE => {
-                let value = unsafe { self.value_unchecked(instr.b()) };
-                self.set_value(instr.a(), value)?;
-            }
-
-            // SAFETY: LOAD ops read ptr (address) via union access; the compiler
-            // guarantees the address register was written via from_ptr
-            Opcode::LOAD_I8 => loadop!(self, instr, i8, from_i8),
-            Opcode::LOAD_I16 => loadop!(self, instr, i16, from_i16),
-            Opcode::LOAD_I32 => loadop!(self, instr, i32, from_i32),
-            Opcode::LOAD_I64 => loadop!(self, instr, i64, from_i64),
-            Opcode::LOAD_U8 => loadop!(self, instr, u8, from_u8),
-            Opcode::LOAD_U16 => loadop!(self, instr, u16, from_u16),
-            Opcode::LOAD_U32 => loadop!(self, instr, u32, from_u32),
-            Opcode::LOAD_U64 => loadop!(self, instr, u64, from_u64),
-            Opcode::LOAD_F32 => loadop!(self, instr, f32, from_f32),
-            Opcode::LOAD_F64 => loadop!(self, instr, f64, from_f64),
-
-            // SAFETY: STORE ops read ptr (address) and typed value via union access;
-            // the compiler guarantees the address register holds a ptr and the value
-            // register was written with the matching type
-            Opcode::STORE_I8 => storeop!(self, instr, i8, i8),
-            Opcode::STORE_I16 => storeop!(self, instr, i16, i16),
-            Opcode::STORE_I32 => storeop!(self, instr, i32, i32),
-            Opcode::STORE_I64 => storeop!(self, instr, i64, i64),
-            Opcode::STORE_U8 => storeop!(self, instr, u8, u8),
-            Opcode::STORE_U16 => storeop!(self, instr, u16, u16),
-            Opcode::STORE_U32 => storeop!(self, instr, u32, u32),
-            Opcode::STORE_U64 => storeop!(self, instr, u64, u64),
-            Opcode::STORE_F32 => storeop!(self, instr, f32, f32),
-            Opcode::STORE_F64 => storeop!(self, instr, f64, f64),
-
-            // SAFETY: ADD/SUB/MUL/DIV/MOD ops read typed fields matching their
-            // opcode; the compiler emits these only when registers hold the
-            // corresponding type (written via from_* constructors)
-            Opcode::ADD_I8 => scalar_binop!(self, instr, i8, from_i8, wrapping_add),
-            Opcode::ADD_I16 => scalar_binop!(self, instr, i16, from_i16, wrapping_add),
-            Opcode::ADD_I32 => scalar_binop!(self, instr, i32, from_i32, wrapping_add),
-            Opcode::ADD_I64 => scalar_binop!(self, instr, i64, from_i64, wrapping_add),
-            Opcode::SUB_I8 => scalar_binop!(self, instr, i8, from_i8, wrapping_sub),
-            Opcode::SUB_I16 => scalar_binop!(self, instr, i16, from_i16, wrapping_sub),
-            Opcode::SUB_I32 => scalar_binop!(self, instr, i32, from_i32, wrapping_sub),
-            Opcode::SUB_I64 => scalar_binop!(self, instr, i64, from_i64, wrapping_sub),
-            Opcode::MUL_I8 => scalar_binop!(self, instr, i8, from_i8, wrapping_mul),
-            Opcode::MUL_I16 => scalar_binop!(self, instr, i16, from_i16, wrapping_mul),
-            Opcode::MUL_I32 => scalar_binop!(self, instr, i32, from_i32, wrapping_mul),
-            Opcode::MUL_I64 => scalar_binop!(self, instr, i64, from_i64, wrapping_mul),
-            Opcode::DIV_I8 => int_divop!(self, instr, i8, from_i8, wrapping_div),
-            Opcode::DIV_I16 => int_divop!(self, instr, i16, from_i16, wrapping_div),
-            Opcode::DIV_I32 => int_divop!(self, instr, i32, from_i32, wrapping_div),
-            Opcode::DIV_I64 => int_divop!(self, instr, i64, from_i64, wrapping_div),
-            Opcode::MOD_I8 => int_divop!(self, instr, i8, from_i8, wrapping_rem),
-            Opcode::MOD_I16 => int_divop!(self, instr, i16, from_i16, wrapping_rem),
-            Opcode::MOD_I32 => int_divop!(self, instr, i32, from_i32, wrapping_rem),
-            Opcode::MOD_I64 => int_divop!(self, instr, i64, from_i64, wrapping_rem),
-            Opcode::NEG_I8 => int_negop!(self, instr, i8, from_i8),
-            Opcode::NEG_I16 => int_negop!(self, instr, i16, from_i16),
-            Opcode::NEG_I32 => int_negop!(self, instr, i32, from_i32),
-            Opcode::NEG_I64 => int_negop!(self, instr, i64, from_i64),
-
-            Opcode::ADD_U8 => scalar_binop!(self, instr, u8, from_u8, wrapping_add),
-            Opcode::ADD_U16 => scalar_binop!(self, instr, u16, from_u16, wrapping_add),
-            Opcode::ADD_U32 => scalar_binop!(self, instr, u32, from_u32, wrapping_add),
-            Opcode::ADD_U64 => scalar_binop!(self, instr, u64, from_u64, wrapping_add),
-            Opcode::SUB_U8 => scalar_binop!(self, instr, u8, from_u8, wrapping_sub),
-            Opcode::SUB_U16 => scalar_binop!(self, instr, u16, from_u16, wrapping_sub),
-            Opcode::SUB_U32 => scalar_binop!(self, instr, u32, from_u32, wrapping_sub),
-            Opcode::SUB_U64 => scalar_binop!(self, instr, u64, from_u64, wrapping_sub),
-            Opcode::MUL_U8 => scalar_binop!(self, instr, u8, from_u8, wrapping_mul),
-            Opcode::MUL_U16 => scalar_binop!(self, instr, u16, from_u16, wrapping_mul),
-            Opcode::MUL_U32 => scalar_binop!(self, instr, u32, from_u32, wrapping_mul),
-            Opcode::MUL_U64 => scalar_binop!(self, instr, u64, from_u64, wrapping_mul),
-            Opcode::DIV_U8 => int_divop!(self, instr, u8, from_u8, wrapping_div),
-            Opcode::DIV_U16 => int_divop!(self, instr, u16, from_u16, wrapping_div),
-            Opcode::DIV_U32 => int_divop!(self, instr, u32, from_u32, wrapping_div),
-            Opcode::DIV_U64 => int_divop!(self, instr, u64, from_u64, wrapping_div),
-            Opcode::MOD_U8 => int_divop!(self, instr, u8, from_u8, wrapping_rem),
-            Opcode::MOD_U16 => int_divop!(self, instr, u16, from_u16, wrapping_rem),
-            Opcode::MOD_U32 => int_divop!(self, instr, u32, from_u32, wrapping_rem),
-            Opcode::MOD_U64 => int_divop!(self, instr, u64, from_u64, wrapping_rem),
-
-            Opcode::ADD_F32 => float_binop!(self, instr, f32, from_f32, +),
-            Opcode::ADD_F64 => float_binop!(self, instr, f64, from_f64, +),
-            Opcode::SUB_F32 => float_binop!(self, instr, f32, from_f32, -),
-            Opcode::SUB_F64 => float_binop!(self, instr, f64, from_f64, -),
-            Opcode::MUL_F32 => float_binop!(self, instr, f32, from_f32, *),
-            Opcode::MUL_F64 => float_binop!(self, instr, f64, from_f64, *),
-            Opcode::DIV_F32 => float_binop!(self, instr, f32, from_f32, /),
-            Opcode::DIV_F64 => float_binop!(self, instr, f64, from_f64, /),
-            Opcode::NEG_F32 => float_negop!(self, instr, f32, from_f32),
-            Opcode::NEG_F64 => float_negop!(self, instr, f64, from_f64),
-
-            Opcode::EQ_I8 => cmpop!(self, instr, i8, ==),
-            Opcode::EQ_I16 => cmpop!(self, instr, i16, ==),
-            Opcode::EQ_I32 => cmpop!(self, instr, i32, ==),
-            Opcode::EQ_I64 => cmpop!(self, instr, i64, ==),
-            Opcode::NE_I8 => cmpop!(self, instr, i8, !=),
-            Opcode::NE_I16 => cmpop!(self, instr, i16, !=),
-            Opcode::NE_I32 => cmpop!(self, instr, i32, !=),
-            Opcode::NE_I64 => cmpop!(self, instr, i64, !=),
-            Opcode::LT_I8 => cmpop!(self, instr, i8, <),
-            Opcode::LT_I16 => cmpop!(self, instr, i16, <),
-            Opcode::LT_I32 => cmpop!(self, instr, i32, <),
-            Opcode::LT_I64 => cmpop!(self, instr, i64, <),
-            Opcode::LE_I8 => cmpop!(self, instr, i8, <=),
-            Opcode::LE_I16 => cmpop!(self, instr, i16, <=),
-            Opcode::LE_I32 => cmpop!(self, instr, i32, <=),
-            Opcode::LE_I64 => cmpop!(self, instr, i64, <=),
-            Opcode::GT_I8 => cmpop!(self, instr, i8, >),
-            Opcode::GT_I16 => cmpop!(self, instr, i16, >),
-            Opcode::GT_I32 => cmpop!(self, instr, i32, >),
-            Opcode::GT_I64 => cmpop!(self, instr, i64, >),
-            Opcode::GE_I8 => cmpop!(self, instr, i8, >=),
-            Opcode::GE_I16 => cmpop!(self, instr, i16, >=),
-            Opcode::GE_I32 => cmpop!(self, instr, i32, >=),
-            Opcode::GE_I64 => cmpop!(self, instr, i64, >=),
-
-            Opcode::LT_U8 => cmpop!(self, instr, u8, <),
-            Opcode::LT_U16 => cmpop!(self, instr, u16, <),
-            Opcode::LT_U32 => cmpop!(self, instr, u32, <),
-            Opcode::LT_U64 => cmpop!(self, instr, u64, <),
-            Opcode::LE_U8 => cmpop!(self, instr, u8, <=),
-            Opcode::LE_U16 => cmpop!(self, instr, u16, <=),
-            Opcode::LE_U32 => cmpop!(self, instr, u32, <=),
-            Opcode::LE_U64 => cmpop!(self, instr, u64, <=),
-            Opcode::GT_U8 => cmpop!(self, instr, u8, >),
-            Opcode::GT_U16 => cmpop!(self, instr, u16, >),
-            Opcode::GT_U32 => cmpop!(self, instr, u32, >),
-            Opcode::GT_U64 => cmpop!(self, instr, u64, >),
-            Opcode::GE_U8 => cmpop!(self, instr, u8, >=),
-            Opcode::GE_U16 => cmpop!(self, instr, u16, >=),
-            Opcode::GE_U32 => cmpop!(self, instr, u32, >=),
-            Opcode::GE_U64 => cmpop!(self, instr, u64, >=),
-
-            Opcode::EQ_F32 => cmpop!(self, instr, f32, ==),
-            Opcode::EQ_F64 => cmpop!(self, instr, f64, ==),
-            Opcode::NE_F32 => cmpop!(self, instr, f32, !=),
-            Opcode::NE_F64 => cmpop!(self, instr, f64, !=),
-            Opcode::LT_F32 => cmpop!(self, instr, f32, <),
-            Opcode::LT_F64 => cmpop!(self, instr, f64, <),
-            Opcode::LE_F32 => cmpop!(self, instr, f32, <=),
-            Opcode::LE_F64 => cmpop!(self, instr, f64, <=),
-            Opcode::GT_F32 => cmpop!(self, instr, f32, >),
-            Opcode::GT_F64 => cmpop!(self, instr, f64, >),
-            Opcode::GE_F32 => cmpop!(self, instr, f32, >=),
-            Opcode::GE_F64 => cmpop!(self, instr, f64, >=),
-
-            Opcode::AND_I8 => bitop!(self, instr, i8, from_i8, &),
-            Opcode::AND_I16 => bitop!(self, instr, i16, from_i16, &),
-            Opcode::AND_I32 => bitop!(self, instr, i32, from_i32, &),
-            Opcode::AND_I64 => bitop!(self, instr, i64, from_i64, &),
-            Opcode::OR_I8 => bitop!(self, instr, i8, from_i8, |),
-            Opcode::OR_I16 => bitop!(self, instr, i16, from_i16, |),
-            Opcode::OR_I32 => bitop!(self, instr, i32, from_i32, |),
-            Opcode::OR_I64 => bitop!(self, instr, i64, from_i64, |),
-            Opcode::XOR_I8 => bitop!(self, instr, i8, from_i8, ^),
-            Opcode::XOR_I16 => bitop!(self, instr, i16, from_i16, ^),
-            Opcode::XOR_I32 => bitop!(self, instr, i32, from_i32, ^),
-            Opcode::XOR_I64 => bitop!(self, instr, i64, from_i64, ^),
-            Opcode::NOT_I8 => notop!(self, instr, i8, from_i8),
-            Opcode::NOT_I16 => notop!(self, instr, i16, from_i16),
-            Opcode::NOT_I32 => notop!(self, instr, i32, from_i32),
-            Opcode::NOT_I64 => notop!(self, instr, i64, from_i64),
-            Opcode::SHL_I8 => shiftop!(self, instr, i8, from_i8, wrapping_shl),
-            Opcode::SHL_I16 => shiftop!(self, instr, i16, from_i16, wrapping_shl),
-            Opcode::SHL_I32 => shiftop!(self, instr, i32, from_i32, wrapping_shl),
-            Opcode::SHL_I64 => shiftop!(self, instr, i64, from_i64, wrapping_shl),
-            Opcode::SHR_I8 => shiftop!(self, instr, i8, from_i8, wrapping_shr),
-            Opcode::SHR_I16 => shiftop!(self, instr, i16, from_i16, wrapping_shr),
-            Opcode::SHR_I32 => shiftop!(self, instr, i32, from_i32, wrapping_shr),
-            Opcode::SHR_I64 => shiftop!(self, instr, i64, from_i64, wrapping_shr),
-            Opcode::USHR_I8 => shiftop!(self, instr, u8, from_u8, wrapping_shr),
-            Opcode::USHR_I16 => shiftop!(self, instr, u16, from_u16, wrapping_shr),
-            Opcode::USHR_I32 => shiftop!(self, instr, u32, from_u32, wrapping_shr),
-            Opcode::USHR_I64 => shiftop!(self, instr, u64, from_u64, wrapping_shr),
-
-            Opcode::JMP => {
-                let offset = if extended_bits != 0 {
-                    effective_offset as i16
-                } else {
-                    instr.sbx_ab()
-                };
-                self.jump(offset - 1)?;
-            }
-            Opcode::JMPIF => {
-                let offset = if extended_bits != 0 {
-                    effective_offset as i16
-                } else {
-                    instr.sbx()
-                };
-                // SAFETY: scalar_unchecked returns a Register; reading u64 from any
-                // Register is sound since all fields occupy the same 64 bits
-                if unsafe { self.scalar_unchecked(instr.a()).u64 } != 0 {
-                    self.jump(offset - 1)?;
-                }
-            }
-            Opcode::JMPIFNOT => {
-                let offset = if extended_bits != 0 {
-                    effective_offset as i16
-                } else {
-                    instr.sbx()
-                };
-                // SAFETY: scalar_unchecked returns a Register; reading u64 from any
-                // Register is sound since all fields occupy the same 64 bits
-                if unsafe { self.scalar_unchecked(instr.a()).u64 } == 0 {
-                    self.jump(offset - 1)?;
-                }
-            }
-
-            Opcode::GETUPVAL => {
-                let dest = instr.a();
-                let idx = instr.b() as usize;
-                let closure_reg = instr.c();
-                let value = match unsafe { self.value_unchecked(closure_reg) } {
-                    VmValue::Closure { ref upvalues, .. } => {
-                        let upvalues = unsafe { &*upvalues.get() };
-                        upvalues.get(idx).cloned()
-                    }
-                    _ => return Err(VMError::ExpectedFunction(closure_reg)),
-                }
-                .ok_or(VMError::InvalidRegister(idx as u8))?;
-                unsafe { self.set_value_unchecked(dest, value); }
-            }
-            Opcode::SETUPVAL => {
-                let src = instr.a();
-                let idx = instr.b() as usize;
-                let closure_reg = instr.c();
-                let value = unsafe { self.value_unchecked(src) };
-                let frame = unsafe { self
-                    .stack
-                    .current_mut_unchecked() };
-                let slot = unsafe { frame
-                    .get_mut_unchecked(closure_reg) };
-                match slot {
-                    VmValue::Closure { upvalues, .. } => {
-                        let upvalues = unsafe { &mut *upvalues.get() };
-                        if idx >= upvalues.len() {
-                            return Err(VMError::InvalidRegister(idx as u8));
-                        }
-                        upvalues[idx] = value;
-                    }
-                    _ => return Err(VMError::ExpectedFunction(closure_reg)),
-                }
-            }
-
-            Opcode::TRY => {
-                let offset = instr.bx() as i16 as isize;
-                let handler_pc = unsafe { self.stack.current_unchecked()
-                    .pc.wrapping_sub(1).wrapping_add(offset as usize) };
-                unsafe { self.stack
-                    .current_mut_unchecked()
-                    .push_handler(handler_pc as u32); }
-            }
-            Opcode::ENDTRY => {
-                unsafe { self.stack
-                    .current_mut_unchecked()
-                    .pop_handler(); }
-            }
-            Opcode::THROW => {
-                let value = unsafe { self.value_unchecked(instr.a()) };
-                if let Some(handler_pc) = unsafe { self.stack.current_unchecked()
-                    .current_handler() }
-                {
-                    unsafe {
-                        self.stack
-                            .current_mut_unchecked()
-                            .pc = handler_pc as usize;
-                        self.set_value_unchecked(0, value);
-                    }
-                    unsafe {
-                        self.stack
-                            .current_mut_unchecked()
-                            .pop_handler();
-                    }
-                } else {
-                    self.stack.pop_frame();
-                    if self.stack.is_empty() {
-                        return Err(VMError::Runtime {
-                            message: "uncaught exception".to_string(),
-                            backtrace: vec![],
-                        });
-                    }
-                    return Err(VMError::Thrown(value));
-                }
-            }
-
-            Opcode::CLOSURE => {
-                let upvalue_count = instr.c() as usize;
-                let callable_idx = if extended_bits != 0 {
-                    effective_bx as usize
-                } else {
-                    instr.b() as usize
-                };
-                let closure = {
-                    let module = self.module()?;
-                    match module
-                        .callables
-                        .get(callable_idx)
-                        .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
-                    {
-                        Callable::Function(function_id) => {
-                            let function = module
-                                .functions
-                                .get(*function_id as usize)
-                                .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
-                            let mut upvalues = Vec::with_capacity(upvalue_count);
-                            let frame = unsafe { self.stack.current_unchecked() };
-                            let reg_count = frame.chunk.max_registers as usize;
-                            for i in 0..upvalue_count {
-                                let reg_idx = reg_count - upvalue_count + i;
-                                upvalues.push(
-                                    unsafe { frame
-                                        .get_unchecked(reg_idx as u8) }
-                                        .clone(),
-                                );
-                            }
-                            VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
-                        }
-                        Callable::Import(import_idx) => {
-                            let import_decl = module
-                                .imports
-                                .get(*import_idx as usize)
-                                .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
-                            let resolved = self
-                                .linker
-                                .resolve(import_decl)
-                                .ok_or_else(|| {
-                                    VMError::UnresolvedNativeImport(import_decl.to_string())
-                                })?;
-                            VmValue::native_import(resolved)
-                        }
-                    }
-                };
-                self.set_value(instr.a(), closure)?;
-            }
-            Opcode::CALL => self.call(instr.a(), instr.b(), instr.c())?,
-            Opcode::CALLTAIL => {
-                let base = instr.a();
-                let arg_count = instr.b();
-
-                let mut args = Vec::with_capacity(arg_count as usize);
-                for index in 0..arg_count {
-                    let src = base
-                        .checked_add(1)
-                        .and_then(|v| v.checked_add(index))
-                        .ok_or(VMError::InvalidRegister(base))?;
-                    args.push(unsafe { self.value_unchecked(src) });
-                }
-
-                let callable = unsafe { self.value_unchecked(base) };
-
-                if let Some(function) = callable.as_function() {
-                    let frame = unsafe { self.stack.current_mut_unchecked() };
-                    frame.set_chunk(function);
-                    frame.pc = 0;
-                    for (i, arg) in args.into_iter().enumerate() {
-                        unsafe { frame.set_unchecked(i as u8, arg); }
-                    }
-                    // Store function reference for nested CALLTAIL
-                    unsafe { frame.set_unchecked(arg_count, callable); }
-                } else if let Some(idx) = callable.as_native_import() {
-                    let returns = self
-                        .linker
-                        .call(idx, &args, &mut self.memory)
-                        .map_err(|e| VMError::NativeError(e.message))?;
-                    for (i, val) in returns.into_iter().enumerate() {
-                        let tgt = base
-                            .checked_add(i as u8)
-                            .ok_or(VMError::InvalidRegister(base))?;
-                        unsafe { self.set_value_unchecked(tgt, val); }
-                    }
-                    return self.ret(base, 0);
-                } else if let Some(closure) = callable.as_closure() {
-                    let (chunk, _upvalues) = closure;
-                    let frame = unsafe { self.stack.current_mut_unchecked() };
-                    frame.set_chunk(chunk.clone());
-                    frame.pc = 0;
-                    for (i, arg) in args.into_iter().enumerate() {
-                        unsafe { frame.set_unchecked(i as u8, arg); }
-                    }
-                } else {
-                    return Err(VMError::ExpectedFunction(base));
-                }
-            }
-            Opcode::RET => self.ret(instr.a(), instr.b())?,
-
-            Opcode::GETG => {
-                let value = self
-                    .globals
-                    .get(instr.bx() as usize)
-                    .cloned()
-                    .unwrap_or_default();
-                self.set_value(instr.a(), value)?;
-            }
-            Opcode::SETG => {
-                let gx = instr.bx() as usize;
-                if gx >= MAX_GLOBALS {
-                    return Err(VMError::NativeError("global index out of range".to_string()));
-                }
-                let value = unsafe { self.value_unchecked(instr.a()) };
-                if gx >= self.globals.len() {
-                    self.globals.resize(gx + 1, VmValue::default());
-                }
-                self.globals[gx] = value;
-            }
-
-            Opcode::CONV => {
-                let from_type = instr.c() >> 4;
-                let to_type = instr.c() & 0x0F;
-                let from = ValueType::from_byte(from_type)
-                    .ok_or(VMError::InvalidConversionType(from_type))?;
-                let to =
-                    ValueType::from_byte(to_type).ok_or(VMError::InvalidConversionType(to_type))?;
-                let result = convert_register(unsafe { self.scalar_unchecked(instr.b()) }, from, to);
-                self.set_scalar(instr.a(), result)?;
-            }
-            Opcode::EXT => {
-                return Err(VMError::NativeError(
-                    "unexpected EXT in execute (should have been handled by fetch)".to_string(),
-                ));
-            }
-        }
-
-        Ok(())
+        let dispatch = dispatch_table();
+        dispatch[instr.opcode_byte as usize](self, instr, extended_bits)
     }
 
     pub fn scalar(&self, register: u8) -> Result<Register, VMError> {
@@ -928,8 +1233,6 @@ impl Vm {
             .ok_or(VMError::ExpectedScalar(register))
     }
 
-    /// SAFETY: caller must guarantee register < frame register count and the
-    /// value at register is a Scalar. Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn scalar_unchecked(&self, register: u8) -> Register {
         let frame = unsafe { self.stack.current_unchecked() };
@@ -949,8 +1252,6 @@ impl Vm {
             .ok_or(VMError::InvalidRegister(register))
     }
 
-    /// SAFETY: caller must guarantee register < frame register count.
-    /// Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn value_unchecked(&self, register: u8) -> VmValue {
         unsafe { self.stack.current_unchecked().get_unchecked(register).clone() }
@@ -960,8 +1261,6 @@ impl Vm {
         self.set_value(register, VmValue::scalar(value))
     }
 
-    /// SAFETY: caller must guarantee register < frame register count.
-    /// Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn set_scalar_unchecked(&mut self, register: u8, value: Register) {
         unsafe { self.set_value_unchecked(register, VmValue::scalar(value)); }
@@ -976,8 +1275,6 @@ impl Vm {
         }
     }
 
-    /// SAFETY: caller must guarantee register < frame register count.
-    /// Guaranteed by bytecode validator.
     #[inline(always)]
     pub unsafe fn set_value_unchecked(&mut self, register: u8, value: VmValue) {
         unsafe { self.stack.current_mut_unchecked().set_unchecked(register, value); }
