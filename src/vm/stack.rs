@@ -3,6 +3,8 @@ use std::rc::Rc;
 use crate::bytecode::Chunk;
 use crate::vm::register::{Register, VmValue};
 
+pub const MAX_REGISTERS: u8 = 64;
+
 pub struct Frame {
     pub chunk: Rc<Chunk>,
     pub pc: usize,

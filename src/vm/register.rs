@@ -6,6 +6,22 @@
 // │          f32    │       f64       │ <- floats              │
 // │                 │       ptr       │ <- pointer             │
 // └────────────────────────────────────────────────────────────┘
+//
+// # Safety
+//
+// `Register` is a union whose fields all occupy the same 64-bit storage.
+// The safe-usage contract is:
+//
+// 1. A `Register` can be safely read via any named field whose type matches
+//    the last write. The bytecode compiler guarantees this by emitting typed
+//    opcodes (e.g. ADD_I64 produces operands that were written by from_i64).
+//
+// 2. Every `from_*` constructor produces a valid bit pattern for its
+//    respective type, so reading the same field back is always sound.
+//
+// 3. Reading via `bits: u64` is always safe regardless of which field was
+//    last written, because the union is exactly 64 bits wide and `u64` is
+//    valid for every possible bit pattern.
 
 use std::rc::Rc;
 

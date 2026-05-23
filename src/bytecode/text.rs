@@ -284,6 +284,13 @@ pub fn validate_module(module: &Module) -> Result<(), String> {
         }
     }
     for (function_id, function) in module.functions.iter().enumerate() {
+        if function.chunk.max_registers > crate::vm::stack::MAX_REGISTERS {
+            return Err(format!(
+                "function {function_id} declares {regs} registers, max is {max}",
+                regs = function.chunk.max_registers,
+                max = crate::vm::stack::MAX_REGISTERS
+            ));
+        }
         for (pc, instr) in function.chunk.code.iter().enumerate() {
             validate_instruction(module, function_id, function.chunk.max_registers, pc, instr)?;
         }
@@ -366,32 +373,10 @@ pub fn format_instruction(instr: &Instruction) -> String {
 
         op => {
             let name = lowercase_opcode(op);
-            match op {
-                Opcode::LOAD_I8
-                | Opcode::LOAD_I16
-                | Opcode::LOAD_I32
-                | Opcode::LOAD_I64
-                | Opcode::LOAD_U8
-                | Opcode::LOAD_U16
-                | Opcode::LOAD_U32
-                | Opcode::LOAD_U64
-                | Opcode::LOAD_F32
-                | Opcode::LOAD_F64 => {
-                    format!("{name} r{}, r{}, {}", instr.a(), instr.b(), instr.c())
-                }
-                Opcode::STORE_I8
-                | Opcode::STORE_I16
-                | Opcode::STORE_I32
-                | Opcode::STORE_I64
-                | Opcode::STORE_U8
-                | Opcode::STORE_U16
-                | Opcode::STORE_U32
-                | Opcode::STORE_U64
-                | Opcode::STORE_F32
-                | Opcode::STORE_F64 => {
-                    format!("{name} r{}, {}, r{}", instr.a(), instr.b(), instr.c())
-                }
-                _ => format!("{name} r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
+            match instruction_format(op) {
+                InstrFormat::RRR => format!("{name} r{}, r{}, r{}", instr.a(), instr.b(), instr.c()),
+                InstrFormat::RIR => format!("{name} r{}, {}, r{}", instr.a(), instr.b(), instr.c()),
+                InstrFormat::RRI => format!("{name} r{}, r{}, {}", instr.a(), instr.b(), instr.c()),
             }
         }
     }
@@ -612,11 +597,245 @@ fn parse_function_header(line: &str, line_no: usize) -> Result<Function, TextErr
     Ok(Function { name, chunk })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstrFormat {
+    RRR,
+    RIR,
+    RRI,
+}
+
+fn instruction_format(opcode: Opcode) -> InstrFormat {
+    match opcode {
+        Opcode::LOAD_I8
+        | Opcode::LOAD_I16
+        | Opcode::LOAD_I32
+        | Opcode::LOAD_I64
+        | Opcode::LOAD_U8
+        | Opcode::LOAD_U16
+        | Opcode::LOAD_U32
+        | Opcode::LOAD_U64
+        | Opcode::LOAD_F32
+        | Opcode::LOAD_F64 => InstrFormat::RRI,
+        Opcode::STORE_I8
+        | Opcode::STORE_I16
+        | Opcode::STORE_I32
+        | Opcode::STORE_I64
+        | Opcode::STORE_U8
+        | Opcode::STORE_U16
+        | Opcode::STORE_U32
+        | Opcode::STORE_U64
+        | Opcode::STORE_F32
+        | Opcode::STORE_F64 => InstrFormat::RIR,
+        _ => InstrFormat::RRR,
+    }
+}
+
+fn parse_typed_mnemonic(
+    op: &str,
+    tokens: &[String],
+    line_no: usize,
+) -> Result<Option<Vec<Instruction>>, TextError> {
+    if let Some(dot) = op.rfind('.') {
+        let base = &op[..dot];
+        let suffix = &op[dot + 1..];
+        let opcode = match (base, suffix) {
+            ("load", "i8") => Opcode::LOAD_I8,
+            ("load", "i16") => Opcode::LOAD_I16,
+            ("load", "i32") => Opcode::LOAD_I32,
+            ("load", "i64") => Opcode::LOAD_I64,
+            ("load", "u8") => Opcode::LOAD_U8,
+            ("load", "u16") => Opcode::LOAD_U16,
+            ("load", "u32") => Opcode::LOAD_U32,
+            ("load", "u64") => Opcode::LOAD_U64,
+            ("load", "f32") => Opcode::LOAD_F32,
+            ("load", "f64") => Opcode::LOAD_F64,
+
+            ("store", "i8") => Opcode::STORE_I8,
+            ("store", "i16") => Opcode::STORE_I16,
+            ("store", "i32") => Opcode::STORE_I32,
+            ("store", "i64") => Opcode::STORE_I64,
+            ("store", "u8") => Opcode::STORE_U8,
+            ("store", "u16") => Opcode::STORE_U16,
+            ("store", "u32") => Opcode::STORE_U32,
+            ("store", "u64") => Opcode::STORE_U64,
+            ("store", "f32") => Opcode::STORE_F32,
+            ("store", "f64") => Opcode::STORE_F64,
+
+            ("add", "i8") => Opcode::ADD_I8,
+            ("add", "i16") => Opcode::ADD_I16,
+            ("add", "i32") => Opcode::ADD_I32,
+            ("add", "i64") => Opcode::ADD_I64,
+            ("add", "u8") => Opcode::ADD_U8,
+            ("add", "u16") => Opcode::ADD_U16,
+            ("add", "u32") => Opcode::ADD_U32,
+            ("add", "u64") => Opcode::ADD_U64,
+            ("add", "f32") => Opcode::ADD_F32,
+            ("add", "f64") => Opcode::ADD_F64,
+
+            ("sub", "i8") => Opcode::SUB_I8,
+            ("sub", "i16") => Opcode::SUB_I16,
+            ("sub", "i32") => Opcode::SUB_I32,
+            ("sub", "i64") => Opcode::SUB_I64,
+            ("sub", "u8") => Opcode::SUB_U8,
+            ("sub", "u16") => Opcode::SUB_U16,
+            ("sub", "u32") => Opcode::SUB_U32,
+            ("sub", "u64") => Opcode::SUB_U64,
+            ("sub", "f32") => Opcode::SUB_F32,
+            ("sub", "f64") => Opcode::SUB_F64,
+
+            ("mul", "i8") => Opcode::MUL_I8,
+            ("mul", "i16") => Opcode::MUL_I16,
+            ("mul", "i32") => Opcode::MUL_I32,
+            ("mul", "i64") => Opcode::MUL_I64,
+            ("mul", "u8") => Opcode::MUL_U8,
+            ("mul", "u16") => Opcode::MUL_U16,
+            ("mul", "u32") => Opcode::MUL_U32,
+            ("mul", "u64") => Opcode::MUL_U64,
+            ("mul", "f32") => Opcode::MUL_F32,
+            ("mul", "f64") => Opcode::MUL_F64,
+
+            ("div", "i8") => Opcode::DIV_I8,
+            ("div", "i16") => Opcode::DIV_I16,
+            ("div", "i32") => Opcode::DIV_I32,
+            ("div", "i64") => Opcode::DIV_I64,
+            ("div", "u8") => Opcode::DIV_U8,
+            ("div", "u16") => Opcode::DIV_U16,
+            ("div", "u32") => Opcode::DIV_U32,
+            ("div", "u64") => Opcode::DIV_U64,
+            ("div", "f32") => Opcode::DIV_F32,
+            ("div", "f64") => Opcode::DIV_F64,
+
+            ("mod", "i8") => Opcode::MOD_I8,
+            ("mod", "i16") => Opcode::MOD_I16,
+            ("mod", "i32") => Opcode::MOD_I32,
+            ("mod", "i64") => Opcode::MOD_I64,
+            ("mod", "u8") => Opcode::MOD_U8,
+            ("mod", "u16") => Opcode::MOD_U16,
+            ("mod", "u32") => Opcode::MOD_U32,
+            ("mod", "u64") => Opcode::MOD_U64,
+
+            ("neg", "i8") => Opcode::NEG_I8,
+            ("neg", "i16") => Opcode::NEG_I16,
+            ("neg", "i32") => Opcode::NEG_I32,
+            ("neg", "i64") => Opcode::NEG_I64,
+            ("neg", "f32") => Opcode::NEG_F32,
+            ("neg", "f64") => Opcode::NEG_F64,
+
+            ("and", "i8") => Opcode::AND_I8,
+            ("and", "i16") => Opcode::AND_I16,
+            ("and", "i32") => Opcode::AND_I32,
+            ("and", "i64") => Opcode::AND_I64,
+
+            ("or", "i8") => Opcode::OR_I8,
+            ("or", "i16") => Opcode::OR_I16,
+            ("or", "i32") => Opcode::OR_I32,
+            ("or", "i64") => Opcode::OR_I64,
+
+            ("xor", "i8") => Opcode::XOR_I8,
+            ("xor", "i16") => Opcode::XOR_I16,
+            ("xor", "i32") => Opcode::XOR_I32,
+            ("xor", "i64") => Opcode::XOR_I64,
+
+            ("not", "i8") => Opcode::NOT_I8,
+            ("not", "i16") => Opcode::NOT_I16,
+            ("not", "i32") => Opcode::NOT_I32,
+            ("not", "i64") => Opcode::NOT_I64,
+
+            ("shl", "i8") => Opcode::SHL_I8,
+            ("shl", "i16") => Opcode::SHL_I16,
+            ("shl", "i32") => Opcode::SHL_I32,
+            ("shl", "i64") => Opcode::SHL_I64,
+
+            ("shr", "i8") => Opcode::SHR_I8,
+            ("shr", "i16") => Opcode::SHR_I16,
+            ("shr", "i32") => Opcode::SHR_I32,
+            ("shr", "i64") => Opcode::SHR_I64,
+
+            ("ushr", "i8") => Opcode::USHR_I8,
+            ("ushr", "i16") => Opcode::USHR_I16,
+            ("ushr", "i32") => Opcode::USHR_I32,
+            ("ushr", "i64") => Opcode::USHR_I64,
+
+            ("eq", "i8") => Opcode::EQ_I8,
+            ("eq", "i16") => Opcode::EQ_I16,
+            ("eq", "i32") => Opcode::EQ_I32,
+            ("eq", "i64") => Opcode::EQ_I64,
+            ("eq", "f32") => Opcode::EQ_F32,
+            ("eq", "f64") => Opcode::EQ_F64,
+
+            ("ne", "i8") => Opcode::NE_I8,
+            ("ne", "i16") => Opcode::NE_I16,
+            ("ne", "i32") => Opcode::NE_I32,
+            ("ne", "i64") => Opcode::NE_I64,
+            ("ne", "f32") => Opcode::NE_F32,
+            ("ne", "f64") => Opcode::NE_F64,
+
+            ("lt", "i8") => Opcode::LT_I8,
+            ("lt", "i16") => Opcode::LT_I16,
+            ("lt", "i32") => Opcode::LT_I32,
+            ("lt", "i64") => Opcode::LT_I64,
+            ("lt", "u8") => Opcode::LT_U8,
+            ("lt", "u16") => Opcode::LT_U16,
+            ("lt", "u32") => Opcode::LT_U32,
+            ("lt", "u64") => Opcode::LT_U64,
+            ("lt", "f32") => Opcode::LT_F32,
+            ("lt", "f64") => Opcode::LT_F64,
+
+            ("le", "i8") => Opcode::LE_I8,
+            ("le", "i16") => Opcode::LE_I16,
+            ("le", "i32") => Opcode::LE_I32,
+            ("le", "i64") => Opcode::LE_I64,
+            ("le", "u8") => Opcode::LE_U8,
+            ("le", "u16") => Opcode::LE_U16,
+            ("le", "u32") => Opcode::LE_U32,
+            ("le", "u64") => Opcode::LE_U64,
+            ("le", "f32") => Opcode::LE_F32,
+            ("le", "f64") => Opcode::LE_F64,
+
+            ("gt", "i8") => Opcode::GT_I8,
+            ("gt", "i16") => Opcode::GT_I16,
+            ("gt", "i32") => Opcode::GT_I32,
+            ("gt", "i64") => Opcode::GT_I64,
+            ("gt", "u8") => Opcode::GT_U8,
+            ("gt", "u16") => Opcode::GT_U16,
+            ("gt", "u32") => Opcode::GT_U32,
+            ("gt", "u64") => Opcode::GT_U64,
+            ("gt", "f32") => Opcode::GT_F32,
+            ("gt", "f64") => Opcode::GT_F64,
+
+            ("ge", "i8") => Opcode::GE_I8,
+            ("ge", "i16") => Opcode::GE_I16,
+            ("ge", "i32") => Opcode::GE_I32,
+            ("ge", "i64") => Opcode::GE_I64,
+            ("ge", "u8") => Opcode::GE_U8,
+            ("ge", "u16") => Opcode::GE_U16,
+            ("ge", "u32") => Opcode::GE_U32,
+            ("ge", "u64") => Opcode::GE_U64,
+            ("ge", "f32") => Opcode::GE_F32,
+            ("ge", "f64") => Opcode::GE_F64,
+
+            _ => return Ok(None),
+        };
+        let instr = match instruction_format(opcode) {
+            InstrFormat::RRR => abc(tokens, line_no, opcode)?,
+            InstrFormat::RIR => abc_rir(tokens, line_no, opcode)?,
+            InstrFormat::RRI => abc_rri(tokens, line_no, opcode)?,
+        };
+        return Ok(Some(vec![instr]));
+    }
+    Ok(None)
+}
+
 fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Vec<Instruction>, TextError> {
     let op = tokens
         .first()
         .ok_or_else(|| TextError::new(line_no, 1, "empty instruction"))?
         .as_str();
+
+    if let Some(instrs) = parse_typed_mnemonic(op, tokens, line_no)? {
+        return Ok(instrs);
+    }
+
     let result: Vec<Instruction> = match op {
         "halt" => vec![Instruction::abc(Opcode::HALT, 0, 0, 0)],
         "nop" => vec![Instruction::abc(Opcode::NOP, 0, 0, 0)],
@@ -722,171 +941,6 @@ fn parse_instruction(tokens: &[String], line_no: usize) -> Result<Vec<Instructio
             )]
         }
         "conv" => vec![abc(tokens, line_no, Opcode::CONV)?],
-
-        "load.i8" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I8)?],
-        "load.i16" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I16)?],
-        "load.i32" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I32)?],
-        "load.i64" => vec![abc_rri(tokens, line_no, Opcode::LOAD_I64)?],
-        "load.u8" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U8)?],
-        "load.u16" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U16)?],
-        "load.u32" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U32)?],
-        "load.u64" => vec![abc_rri(tokens, line_no, Opcode::LOAD_U64)?],
-        "load.f32" => vec![abc_rri(tokens, line_no, Opcode::LOAD_F32)?],
-        "load.f64" => vec![abc_rri(tokens, line_no, Opcode::LOAD_F64)?],
-
-        "store.i8" => vec![abc_rir(tokens, line_no, Opcode::STORE_I8)?],
-        "store.i16" => vec![abc_rir(tokens, line_no, Opcode::STORE_I16)?],
-        "store.i32" => vec![abc_rir(tokens, line_no, Opcode::STORE_I32)?],
-        "store.i64" => vec![abc_rir(tokens, line_no, Opcode::STORE_I64)?],
-        "store.u8" => vec![abc_rir(tokens, line_no, Opcode::STORE_U8)?],
-        "store.u16" => vec![abc_rir(tokens, line_no, Opcode::STORE_U16)?],
-        "store.u32" => vec![abc_rir(tokens, line_no, Opcode::STORE_U32)?],
-        "store.u64" => vec![abc_rir(tokens, line_no, Opcode::STORE_U64)?],
-        "store.f32" => vec![abc_rir(tokens, line_no, Opcode::STORE_F32)?],
-        "store.f64" => vec![abc_rir(tokens, line_no, Opcode::STORE_F64)?],
-
-        "add.i8" => vec![abc(tokens, line_no, Opcode::ADD_I8)?],
-        "add.i16" => vec![abc(tokens, line_no, Opcode::ADD_I16)?],
-        "add.i32" => vec![abc(tokens, line_no, Opcode::ADD_I32)?],
-        "add.i64" => vec![abc(tokens, line_no, Opcode::ADD_I64)?],
-        "sub.i8" => vec![abc(tokens, line_no, Opcode::SUB_I8)?],
-        "sub.i16" => vec![abc(tokens, line_no, Opcode::SUB_I16)?],
-        "sub.i32" => vec![abc(tokens, line_no, Opcode::SUB_I32)?],
-        "sub.i64" => vec![abc(tokens, line_no, Opcode::SUB_I64)?],
-        "mul.i8" => vec![abc(tokens, line_no, Opcode::MUL_I8)?],
-        "mul.i16" => vec![abc(tokens, line_no, Opcode::MUL_I16)?],
-        "mul.i32" => vec![abc(tokens, line_no, Opcode::MUL_I32)?],
-        "mul.i64" => vec![abc(tokens, line_no, Opcode::MUL_I64)?],
-        "div.i8" => vec![abc(tokens, line_no, Opcode::DIV_I8)?],
-        "div.i16" => vec![abc(tokens, line_no, Opcode::DIV_I16)?],
-        "div.i32" => vec![abc(tokens, line_no, Opcode::DIV_I32)?],
-        "div.i64" => vec![abc(tokens, line_no, Opcode::DIV_I64)?],
-        "mod.i8" => vec![abc(tokens, line_no, Opcode::MOD_I8)?],
-        "mod.i16" => vec![abc(tokens, line_no, Opcode::MOD_I16)?],
-        "mod.i32" => vec![abc(tokens, line_no, Opcode::MOD_I32)?],
-        "mod.i64" => vec![abc(tokens, line_no, Opcode::MOD_I64)?],
-        "neg.i8" => vec![abc(tokens, line_no, Opcode::NEG_I8)?],
-        "neg.i16" => vec![abc(tokens, line_no, Opcode::NEG_I16)?],
-        "neg.i32" => vec![abc(tokens, line_no, Opcode::NEG_I32)?],
-        "neg.i64" => vec![abc(tokens, line_no, Opcode::NEG_I64)?],
-
-        "add.u8" => vec![abc(tokens, line_no, Opcode::ADD_U8)?],
-        "add.u16" => vec![abc(tokens, line_no, Opcode::ADD_U16)?],
-        "add.u32" => vec![abc(tokens, line_no, Opcode::ADD_U32)?],
-        "add.u64" => vec![abc(tokens, line_no, Opcode::ADD_U64)?],
-        "sub.u8" => vec![abc(tokens, line_no, Opcode::SUB_U8)?],
-        "sub.u16" => vec![abc(tokens, line_no, Opcode::SUB_U16)?],
-        "sub.u32" => vec![abc(tokens, line_no, Opcode::SUB_U32)?],
-        "sub.u64" => vec![abc(tokens, line_no, Opcode::SUB_U64)?],
-        "mul.u8" => vec![abc(tokens, line_no, Opcode::MUL_U8)?],
-        "mul.u16" => vec![abc(tokens, line_no, Opcode::MUL_U16)?],
-        "mul.u32" => vec![abc(tokens, line_no, Opcode::MUL_U32)?],
-        "mul.u64" => vec![abc(tokens, line_no, Opcode::MUL_U64)?],
-        "div.u8" => vec![abc(tokens, line_no, Opcode::DIV_U8)?],
-        "div.u16" => vec![abc(tokens, line_no, Opcode::DIV_U16)?],
-        "div.u32" => vec![abc(tokens, line_no, Opcode::DIV_U32)?],
-        "div.u64" => vec![abc(tokens, line_no, Opcode::DIV_U64)?],
-        "mod.u8" => vec![abc(tokens, line_no, Opcode::MOD_U8)?],
-        "mod.u16" => vec![abc(tokens, line_no, Opcode::MOD_U16)?],
-        "mod.u32" => vec![abc(tokens, line_no, Opcode::MOD_U32)?],
-        "mod.u64" => vec![abc(tokens, line_no, Opcode::MOD_U64)?],
-
-        "add.f32" => vec![abc(tokens, line_no, Opcode::ADD_F32)?],
-        "add.f64" => vec![abc(tokens, line_no, Opcode::ADD_F64)?],
-        "sub.f32" => vec![abc(tokens, line_no, Opcode::SUB_F32)?],
-        "sub.f64" => vec![abc(tokens, line_no, Opcode::SUB_F64)?],
-        "mul.f32" => vec![abc(tokens, line_no, Opcode::MUL_F32)?],
-        "mul.f64" => vec![abc(tokens, line_no, Opcode::MUL_F64)?],
-        "div.f32" => vec![abc(tokens, line_no, Opcode::DIV_F32)?],
-        "div.f64" => vec![abc(tokens, line_no, Opcode::DIV_F64)?],
-        "neg.f32" => vec![abc(tokens, line_no, Opcode::NEG_F32)?],
-        "neg.f64" => vec![abc(tokens, line_no, Opcode::NEG_F64)?],
-
-        "and.i8" => vec![abc(tokens, line_no, Opcode::AND_I8)?],
-        "and.i16" => vec![abc(tokens, line_no, Opcode::AND_I16)?],
-        "and.i32" => vec![abc(tokens, line_no, Opcode::AND_I32)?],
-        "and.i64" => vec![abc(tokens, line_no, Opcode::AND_I64)?],
-        "or.i8" => vec![abc(tokens, line_no, Opcode::OR_I8)?],
-        "or.i16" => vec![abc(tokens, line_no, Opcode::OR_I16)?],
-        "or.i32" => vec![abc(tokens, line_no, Opcode::OR_I32)?],
-        "or.i64" => vec![abc(tokens, line_no, Opcode::OR_I64)?],
-        "xor.i8" => vec![abc(tokens, line_no, Opcode::XOR_I8)?],
-        "xor.i16" => vec![abc(tokens, line_no, Opcode::XOR_I16)?],
-        "xor.i32" => vec![abc(tokens, line_no, Opcode::XOR_I32)?],
-        "xor.i64" => vec![abc(tokens, line_no, Opcode::XOR_I64)?],
-        "not.i8" => vec![abc(tokens, line_no, Opcode::NOT_I8)?],
-        "not.i16" => vec![abc(tokens, line_no, Opcode::NOT_I16)?],
-        "not.i32" => vec![abc(tokens, line_no, Opcode::NOT_I32)?],
-        "not.i64" => vec![abc(tokens, line_no, Opcode::NOT_I64)?],
-
-        "shl.i8" => vec![abc(tokens, line_no, Opcode::SHL_I8)?],
-        "shl.i16" => vec![abc(tokens, line_no, Opcode::SHL_I16)?],
-        "shl.i32" => vec![abc(tokens, line_no, Opcode::SHL_I32)?],
-        "shl.i64" => vec![abc(tokens, line_no, Opcode::SHL_I64)?],
-        "shr.i8" => vec![abc(tokens, line_no, Opcode::SHR_I8)?],
-        "shr.i16" => vec![abc(tokens, line_no, Opcode::SHR_I16)?],
-        "shr.i32" => vec![abc(tokens, line_no, Opcode::SHR_I32)?],
-        "shr.i64" => vec![abc(tokens, line_no, Opcode::SHR_I64)?],
-        "ushr.i8" => vec![abc(tokens, line_no, Opcode::USHR_I8)?],
-        "ushr.i16" => vec![abc(tokens, line_no, Opcode::USHR_I16)?],
-        "ushr.i32" => vec![abc(tokens, line_no, Opcode::USHR_I32)?],
-        "ushr.i64" => vec![abc(tokens, line_no, Opcode::USHR_I64)?],
-
-        "eq.i8" => vec![abc(tokens, line_no, Opcode::EQ_I8)?],
-        "eq.i16" => vec![abc(tokens, line_no, Opcode::EQ_I16)?],
-        "eq.i32" => vec![abc(tokens, line_no, Opcode::EQ_I32)?],
-        "eq.i64" => vec![abc(tokens, line_no, Opcode::EQ_I64)?],
-        "ne.i8" => vec![abc(tokens, line_no, Opcode::NE_I8)?],
-        "ne.i16" => vec![abc(tokens, line_no, Opcode::NE_I16)?],
-        "ne.i32" => vec![abc(tokens, line_no, Opcode::NE_I32)?],
-        "ne.i64" => vec![abc(tokens, line_no, Opcode::NE_I64)?],
-        "lt.i8" => vec![abc(tokens, line_no, Opcode::LT_I8)?],
-        "lt.i16" => vec![abc(tokens, line_no, Opcode::LT_I16)?],
-        "lt.i32" => vec![abc(tokens, line_no, Opcode::LT_I32)?],
-        "lt.i64" => vec![abc(tokens, line_no, Opcode::LT_I64)?],
-        "le.i8" => vec![abc(tokens, line_no, Opcode::LE_I8)?],
-        "le.i16" => vec![abc(tokens, line_no, Opcode::LE_I16)?],
-        "le.i32" => vec![abc(tokens, line_no, Opcode::LE_I32)?],
-        "le.i64" => vec![abc(tokens, line_no, Opcode::LE_I64)?],
-        "gt.i8" => vec![abc(tokens, line_no, Opcode::GT_I8)?],
-        "gt.i16" => vec![abc(tokens, line_no, Opcode::GT_I16)?],
-        "gt.i32" => vec![abc(tokens, line_no, Opcode::GT_I32)?],
-        "gt.i64" => vec![abc(tokens, line_no, Opcode::GT_I64)?],
-        "ge.i8" => vec![abc(tokens, line_no, Opcode::GE_I8)?],
-        "ge.i16" => vec![abc(tokens, line_no, Opcode::GE_I16)?],
-        "ge.i32" => vec![abc(tokens, line_no, Opcode::GE_I32)?],
-        "ge.i64" => vec![abc(tokens, line_no, Opcode::GE_I64)?],
-
-        "lt.u8" => vec![abc(tokens, line_no, Opcode::LT_U8)?],
-        "lt.u16" => vec![abc(tokens, line_no, Opcode::LT_U16)?],
-        "lt.u32" => vec![abc(tokens, line_no, Opcode::LT_U32)?],
-        "lt.u64" => vec![abc(tokens, line_no, Opcode::LT_U64)?],
-        "le.u8" => vec![abc(tokens, line_no, Opcode::LE_U8)?],
-        "le.u16" => vec![abc(tokens, line_no, Opcode::LE_U16)?],
-        "le.u32" => vec![abc(tokens, line_no, Opcode::LE_U32)?],
-        "le.u64" => vec![abc(tokens, line_no, Opcode::LE_U64)?],
-        "gt.u8" => vec![abc(tokens, line_no, Opcode::GT_U8)?],
-        "gt.u16" => vec![abc(tokens, line_no, Opcode::GT_U16)?],
-        "gt.u32" => vec![abc(tokens, line_no, Opcode::GT_U32)?],
-        "gt.u64" => vec![abc(tokens, line_no, Opcode::GT_U64)?],
-        "ge.u8" => vec![abc(tokens, line_no, Opcode::GE_U8)?],
-        "ge.u16" => vec![abc(tokens, line_no, Opcode::GE_U16)?],
-        "ge.u32" => vec![abc(tokens, line_no, Opcode::GE_U32)?],
-        "ge.u64" => vec![abc(tokens, line_no, Opcode::GE_U64)?],
-
-        "eq.f32" => vec![abc(tokens, line_no, Opcode::EQ_F32)?],
-        "eq.f64" => vec![abc(tokens, line_no, Opcode::EQ_F64)?],
-        "ne.f32" => vec![abc(tokens, line_no, Opcode::NE_F32)?],
-        "ne.f64" => vec![abc(tokens, line_no, Opcode::NE_F64)?],
-        "lt.f32" => vec![abc(tokens, line_no, Opcode::LT_F32)?],
-        "lt.f64" => vec![abc(tokens, line_no, Opcode::LT_F64)?],
-        "le.f32" => vec![abc(tokens, line_no, Opcode::LE_F32)?],
-        "le.f64" => vec![abc(tokens, line_no, Opcode::LE_F64)?],
-        "gt.f32" => vec![abc(tokens, line_no, Opcode::GT_F32)?],
-        "gt.f64" => vec![abc(tokens, line_no, Opcode::GT_F64)?],
-        "ge.f32" => vec![abc(tokens, line_no, Opcode::GE_F32)?],
-        "ge.f64" => vec![abc(tokens, line_no, Opcode::GE_F64)?],
-
         _ => {
             return Err(TextError::new(
                 line_no,

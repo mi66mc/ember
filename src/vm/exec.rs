@@ -8,9 +8,26 @@ use crate::vm::native::{NativeError, NativeLinker};
 use crate::vm::register::{Register, VmValue};
 use crate::vm::stack::CallStack;
 
+// ── Safety contract for union field access in macros ──────────────
+//
+// All macros below use `unsafe { $vm.scalar(reg)?.$field }` to read a
+// named field from a Register union.  This is sound because:
+//
+//  * The bytecode compiler emits typed opcodes.  For example, the
+//    ADD_I64 opcode is only generated when both operands were stored
+//    via Register::from_i64, so reading the `i64` field is valid.
+//
+//  * The LOAD/STORE macros read `ptr` for address operands.  The
+//    compiler guarantees address registers were written via from_ptr.
+//
+//  * The cmpop macros read a specific field and then write a bool
+//    (u64 field), which is always a valid reinterpretation since bool
+//    only distinguishes zero / non-zero.
+
 macro_rules! scalar_binop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         let vc = unsafe { $vm.scalar(c)?.$field };
         $vm.set_scalar(a, Register::$from(vb.$method(vc)))?;
@@ -20,6 +37,7 @@ macro_rules! scalar_binop {
 macro_rules! float_binop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $op:tt) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         let vc = unsafe { $vm.scalar(c)?.$field };
         $vm.set_scalar(a, Register::$from(vb $op vc))?;
@@ -29,6 +47,7 @@ macro_rules! float_binop {
 macro_rules! int_divop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         let vc = unsafe { $vm.scalar(c)?.$field };
         if vc == 0 {
@@ -41,6 +60,7 @@ macro_rules! int_divop {
 macro_rules! int_negop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
         let (a, b) = ($instr.a(), $instr.b());
+        // SAFETY: typed opcodes guarantee register b was written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         $vm.set_scalar(a, Register::$from(vb.wrapping_neg()))?;
     }};
@@ -49,6 +69,7 @@ macro_rules! int_negop {
 macro_rules! float_negop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
         let (a, b) = ($instr.a(), $instr.b());
+        // SAFETY: typed opcodes guarantee register b was written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         $vm.set_scalar(a, Register::$from(-vb))?;
     }};
@@ -57,6 +78,7 @@ macro_rules! float_negop {
 macro_rules! cmpop {
     ($vm:ident, $instr:ident, $field:ident, $op:tt) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         let vc = unsafe { $vm.scalar(c)?.$field };
         $vm.set_scalar(a, Register::from_bool(vb $op vc))?;
@@ -66,6 +88,7 @@ macro_rules! cmpop {
 macro_rules! bitop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $op:tt) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         let vc = unsafe { $vm.scalar(c)?.$field };
         $vm.set_scalar(a, Register::$from(vb $op vc))?;
@@ -75,6 +98,7 @@ macro_rules! bitop {
 macro_rules! notop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
         let (a, b) = ($instr.a(), $instr.b());
+        // SAFETY: typed opcodes guarantee register b was written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         $vm.set_scalar(a, Register::$from(!vb))?;
     }};
@@ -83,6 +107,7 @@ macro_rules! notop {
 macro_rules! shiftop {
     ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>
         let vb = unsafe { $vm.scalar(b)?.$field };
         let vc = unsafe { $vm.scalar(c)?.$field };
         $vm.set_scalar(a, Register::$from(vb.$method(vc as u32)))?;
@@ -92,20 +117,23 @@ macro_rules! shiftop {
 macro_rules! loadop {
     ($vm:ident, $instr:ident, $typ:ty, $from:ident) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        let pc = $vm.stack.current().ok_or(VMError::StackUnderflow)?.pc.wrapping_sub(1);
         let base = unsafe { $vm.scalar(b)?.ptr };
         let addr = base
             .checked_add(c as usize)
-            .ok_or(VMError::MemoryOutOfBounds {
-                addr: base,
-                size: size_of::<$typ>(),
-            })?;
-        let value = $vm
-            .memory
-            .read_checked::<$typ>(addr)
-            .ok_or(VMError::MemoryOutOfBounds {
-                addr,
-                size: size_of::<$typ>(),
-            })?;
+                .ok_or(VMError::MemoryOutOfBounds {
+                    pc,
+                    addr: base,
+                    size: size_of::<$typ>(),
+                })?;
+            let value = $vm
+                .memory
+                .read_checked::<$typ>(addr)
+                .ok_or(VMError::MemoryOutOfBounds {
+                    pc,
+                    addr,
+                    size: size_of::<$typ>(),
+                })?;
         $vm.set_scalar(a, Register::$from(value))?;
     }};
 }
@@ -113,16 +141,19 @@ macro_rules! loadop {
 macro_rules! storeop {
     ($vm:ident, $instr:ident, $field:ident, $typ:ty) => {{
         let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
+        let pc = $vm.stack.current().ok_or(VMError::StackUnderflow)?.pc.wrapping_sub(1);
         let base = unsafe { $vm.scalar(a)?.ptr };
         let addr = base
             .checked_add(b as usize)
             .ok_or(VMError::MemoryOutOfBounds {
+                pc,
                 addr: base,
                 size: size_of::<$typ>(),
             })?;
         let value = unsafe { $vm.scalar(c)?.$field };
         if !$vm.memory.write_checked::<$typ>(addr, value) {
             return Err(VMError::MemoryOutOfBounds {
+                pc,
                 addr,
                 size: size_of::<$typ>(),
             });
@@ -131,6 +162,10 @@ macro_rules! storeop {
 }
 
 fn convert_register(src: Register, from: ValueType, to: ValueType) -> Register {
+    // SAFETY: Each match arm reads the union field that corresponds to the
+    // ValueType variant. The bytecode compiler ensures that from matches the
+    // last field written to src. Reading any valid field and casting to i64
+    // is sound because all fields occupy the same 64-bit storage.
     let as_i64: i64 = unsafe {
         match from {
             ValueType::I8 => src.i8 as i64,
@@ -196,7 +231,7 @@ pub enum VMError {
     UnresolvedNativeImport(String),
     NativeError(String),
     InvalidJump { from: usize, offset: i16 },
-    MemoryOutOfBounds { addr: usize, size: usize },
+    MemoryOutOfBounds { pc: usize, addr: usize, size: usize },
     Runtime {
         message: String,
         backtrace: Vec<FrameInfo>,
@@ -220,6 +255,8 @@ pub struct Vm {
 }
 
 pub type VM = Vm;
+
+const MAX_GLOBALS: usize = 256;
 
 impl Vm {
     pub fn new(memory_size: usize) -> Self {
@@ -267,6 +304,13 @@ impl Vm {
             .get(entry_idx as usize)
             .map(|f| f.name.clone())
             .unwrap_or_else(|| "main".to_string());
+        if entry.max_registers > crate::vm::stack::MAX_REGISTERS {
+            return Err(VMError::NativeError(format!(
+                "entry function has {} registers, max is {}",
+                entry.max_registers,
+                crate::vm::stack::MAX_REGISTERS
+            )));
+        }
         self.module = Some(Rc::new(module));
         self.stack.push_entry(Rc::new(entry), entry_name);
 
@@ -337,6 +381,11 @@ impl Vm {
                     Constant::Bytes(bytes) => {
                         let len = bytes.len();
                         let ptr = self.memory.alloc(len);
+                        // SAFETY: dst was allocated with exactly bytes.len() bytes by
+                        // self.memory.alloc(len) above, and bytes.as_ptr() is valid
+                        // for len bytes. copy_nonoverlapping requires both pointers
+                        // are correctly aligned for u8 (they are) and that the regions
+                        // don't overlap (fresh allocation, so they don't).
                         unsafe {
                             let dst = self.memory.as_mut_ptr().add(ptr);
                             std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
@@ -358,6 +407,8 @@ impl Vm {
                 self.set_value(instr.a(), value)?;
             }
 
+            // SAFETY: LOAD ops read ptr (address) via union access; the compiler
+            // guarantees the address register was written via from_ptr
             Opcode::LOAD_I8 => loadop!(self, instr, i8, from_i8),
             Opcode::LOAD_I16 => loadop!(self, instr, i16, from_i16),
             Opcode::LOAD_I32 => loadop!(self, instr, i32, from_i32),
@@ -369,6 +420,9 @@ impl Vm {
             Opcode::LOAD_F32 => loadop!(self, instr, f32, from_f32),
             Opcode::LOAD_F64 => loadop!(self, instr, f64, from_f64),
 
+            // SAFETY: STORE ops read ptr (address) and typed value via union access;
+            // the compiler guarantees the address register holds a ptr and the value
+            // register was written with the matching type
             Opcode::STORE_I8 => storeop!(self, instr, i8, i8),
             Opcode::STORE_I16 => storeop!(self, instr, i16, i16),
             Opcode::STORE_I32 => storeop!(self, instr, i32, i32),
@@ -535,6 +589,8 @@ impl Vm {
                 } else {
                     instr.sbx()
                 };
+                // SAFETY: scalar() returns a Register; reading u64 from any
+                // Register is sound since all fields occupy the same 64 bits
                 if unsafe { self.scalar(instr.a())?.u64 } != 0 {
                     self.jump(offset - 1)?;
                 }
@@ -545,6 +601,8 @@ impl Vm {
                 } else {
                     instr.sbx()
                 };
+                // SAFETY: scalar() returns a Register; reading u64 from any
+                // Register is sound since all fields occupy the same 64 bits
                 if unsafe { self.scalar(instr.a())?.u64 } == 0 {
                     self.jump(offset - 1)?;
                 }
@@ -600,6 +658,9 @@ impl Vm {
             }
             Opcode::SETG => {
                 let gx = instr.bx() as usize;
+                if gx >= MAX_GLOBALS {
+                    return Err(VMError::NativeError("global index out of range".to_string()));
+                }
                 let value = self.value(instr.a())?;
                 if gx >= self.globals.len() {
                     self.globals.resize(gx + 1, VmValue::default());
@@ -816,6 +877,8 @@ mod tests {
         vm.step().unwrap();
         vm.step().unwrap();
 
+        // SAFETY: tests verify exact register values produced by the bytecode;
+        // reading i64/u64 fields is sound because LOADK writes the matching type
         unsafe {
             assert_eq!(vm.scalar(2).unwrap().i64, 30);
             assert_eq!(vm.scalar(3).unwrap().u64, 1);
@@ -862,6 +925,8 @@ mod tests {
             }
         }
 
+        // SAFETY: tests verify exact register values produced by the bytecode;
+        // reading i64 is sound because LOADK_I64 writes the i64 field
         unsafe {
             assert_eq!(vm.scalar(0).unwrap().i64, 30);
         }
@@ -899,6 +964,8 @@ mod tests {
         vm.stack.push_entry(Rc::new(entry), "test");
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
+        // SAFETY: tests verify exact register values produced by the bytecode;
+        // reading i64 is sound because LOADK writes the i64 field
         unsafe {
             assert_eq!(vm.scalar(0).unwrap().i64, 1);
             assert_eq!(vm.scalar(1).unwrap().i64, 2);
@@ -946,6 +1013,8 @@ mod tests {
         vm.stack.push_entry(Rc::new(entry), "test");
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
+        // SAFETY: tests verify exact register values produced by the bytecode;
+        // reading i64 is sound because LOADK writes the i64 field
         unsafe {
             assert_eq!(vm.scalar(0).unwrap().i64, 7);
         }
@@ -999,7 +1068,7 @@ mod tests {
         vm.step().unwrap();
         assert_eq!(
             vm.step(),
-            Err(VMError::MemoryOutOfBounds { addr: 4, size: 8 })
+            Err(VMError::MemoryOutOfBounds { pc: 2, addr: 4, size: 8 })
         );
     }
 }
