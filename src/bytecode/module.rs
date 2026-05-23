@@ -1,5 +1,5 @@
 use crate::bytecode::{Chunk, Constant, Instruction, Opcode};
-use crate::vm::native::{ImportDecl, ImportKind};
+use crate::bytecode::import::{ImportDecl, ImportKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Callable {

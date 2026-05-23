@@ -1,8 +1,7 @@
 use crate::bytecode::{
-    Callable, Chunk, Constant, Function, Instruction, Module, Opcode,
+    Callable, Chunk, Constant, Function, ImportDecl, Instruction, Module, Opcode,
 };
 use crate::bytecode::module::SourceLocation;
-use crate::vm::native::ImportDecl;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextError {

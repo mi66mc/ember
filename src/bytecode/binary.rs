@@ -1,7 +1,6 @@
 use crate::bytecode::{
-    Callable, Chunk, Constant, Function, Instruction, Module, Opcode,
+    Callable, Chunk, Constant, Function, Instruction, ImportDecl, Module, Opcode,
 };
-use crate::vm::native::ImportDecl;
 
 const MAGIC: &[u8; 4] = b"EMB\0";
 const VERSION: u16 = 1;
