@@ -4,6 +4,7 @@ use crate::bytecode::{Chunk, Instruction};
 use crate::vm::register::{Register, VmValue};
 
 pub const MAX_REGISTERS: u8 = 64;
+pub const MAX_STACK_DEPTH: usize = 256;
 
 pub struct Frame {
     pub(crate) chunk: Rc<Chunk>,
@@ -78,6 +79,15 @@ impl Frame {
 
     pub fn set(&mut self, idx: u8, value: VmValue) -> bool {
         if let Some(slot) = self.registers.get_mut(idx as usize) {
+            if let VmValue::Scalar(r) = &value {
+                if let Some(s) = self.scalar_regs.get_mut(idx as usize) {
+                    *s = unsafe { r.bits };
+                }
+            } else {
+                if let Some(s) = self.scalar_regs.get_mut(idx as usize) {
+                    *s = 0;
+                }
+            }
             *slot = value;
             true
         } else {
@@ -89,6 +99,11 @@ impl Frame {
     /// Guaranteed by the bytecode validator at compile time.
     #[inline(always)]
     pub unsafe fn set_unchecked(&mut self, idx: u8, value: VmValue) {
+        if let VmValue::Scalar(r) = &value {
+            unsafe { *self.scalar_regs.get_unchecked_mut(idx as usize) = r.bits; }
+        } else {
+            unsafe { *self.scalar_regs.get_unchecked_mut(idx as usize) = 0; }
+        }
         unsafe { *self.registers.get_unchecked_mut(idx as usize) = value; }
     }
 
@@ -122,11 +137,39 @@ impl Frame {
     pub fn collect_roots(&self) -> Vec<usize> {
         let mut roots = Vec::new();
         for value in self.registers.iter() {
-            if let VmValue::Scalar(register) = value {
-                let ptr = unsafe { register.ptr };
-                if ptr != 0 {
-                    roots.push(ptr);
+            match value {
+                VmValue::Scalar(register) => {
+                    let ptr = unsafe { register.ptr };
+                    if ptr != 0 {
+                        roots.push(ptr);
+                    }
                 }
+                VmValue::Closure(data) => {
+                    let upvalues = unsafe { &*data.upvalues.get() };
+                    for uv in upvalues.iter() {
+                        match uv {
+                            VmValue::Scalar(register) => {
+                                let ptr = unsafe { register.ptr };
+                                if ptr != 0 {
+                                    roots.push(ptr);
+                                }
+                            }
+                            VmValue::Closure(inner_data) => {
+                                let inner_uvs = unsafe { &*inner_data.upvalues.get() };
+                                for iuv in inner_uvs.iter() {
+                                    if let VmValue::Scalar(register) = iuv {
+                                        let ptr = unsafe { register.ptr };
+                                        if ptr != 0 {
+                                            roots.push(ptr);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         roots

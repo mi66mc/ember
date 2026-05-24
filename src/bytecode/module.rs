@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::bytecode::{Chunk, Constant, Instruction, Opcode};
 use crate::bytecode::import::{ImportDecl, ImportKind};
 
@@ -94,15 +96,29 @@ pub fn link_modules(
     root: Module,
     loader: &dyn Fn(&str) -> Result<Module, String>,
 ) -> Result<Module, String> {
-    // Collect unique external paths
-    use std::collections::HashSet;
+    link_modules_inner(root, loader, &mut HashSet::new())
+}
+
+fn link_modules_inner(
+    root: Module,
+    loader: &dyn Fn(&str) -> Result<Module, String>,
+    visiting: &mut HashSet<String>,
+) -> Result<Module, String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut linked: Vec<Module> = Vec::new();
     for import in &root.imports {
         if let ImportKind::External { path, .. } = &import.kind {
+            if visiting.contains(path) {
+                return Err(format!(
+                    "circular dependency: module '{}' imports '{}' which creates a cycle",
+                    root.name, path
+                ));
+            }
             if seen.insert(path.clone()) {
+                visiting.insert(path.clone());
                 let dep = loader(path)?;
-                linked.push(link_modules(dep, loader)?);
+                linked.push(link_modules_inner(dep, loader, visiting)?);
+                visiting.remove(path);
             }
         }
     }
