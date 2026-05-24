@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::OnceLock;
 
 use crate::bytecode::{
     Callable, Chunk, Constant, Function, Instruction, Module, Opcode, ValueType,
@@ -10,360 +9,7 @@ use crate::vm::native::{NativeError, NativeLinker};
 use crate::vm::register::{Register, VmValue};
 use crate::vm::stack::{CallStack, Frame};
 
-// Token-threaded dispatch: each opcode handler is a standalone function.
-// The main loop fetches the opcode byte, indexes the table, and calls the handler.
-type OpHandler = fn(&mut Vm, Instruction, u32) -> Result<(), VMError>;
-
-static DISPATCH: OnceLock<[OpHandler; 256]> = OnceLock::new();
-
-fn dispatch_table() -> &'static [OpHandler; 256] {
-    DISPATCH.get_or_init(|| {
-        let mut table: [OpHandler; 256] = [op_halt as OpHandler; 256];
-        table[Opcode::LOADK as usize] = op_loadk;
-        table[Opcode::MOVE as usize] = op_move;
-        table[Opcode::LOAD_I8 as usize] = op_load_i8;
-        table[Opcode::LOAD_I16 as usize] = op_load_i16;
-        table[Opcode::LOAD_I32 as usize] = op_load_i32;
-        table[Opcode::LOAD_I64 as usize] = op_load_i64;
-        table[Opcode::LOAD_U8 as usize] = op_load_u8;
-        table[Opcode::LOAD_U16 as usize] = op_load_u16;
-        table[Opcode::LOAD_U32 as usize] = op_load_u32;
-        table[Opcode::LOAD_U64 as usize] = op_load_u64;
-        table[Opcode::LOAD_F32 as usize] = op_load_f32;
-        table[Opcode::LOAD_F64 as usize] = op_load_f64;
-        table[Opcode::STORE_I8 as usize] = op_store_i8;
-        table[Opcode::STORE_I16 as usize] = op_store_i16;
-        table[Opcode::STORE_I32 as usize] = op_store_i32;
-        table[Opcode::STORE_I64 as usize] = op_store_i64;
-        table[Opcode::STORE_U8 as usize] = op_store_u8;
-        table[Opcode::STORE_U16 as usize] = op_store_u16;
-        table[Opcode::STORE_U32 as usize] = op_store_u32;
-        table[Opcode::STORE_U64 as usize] = op_store_u64;
-        table[Opcode::STORE_F32 as usize] = op_store_f32;
-        table[Opcode::STORE_F64 as usize] = op_store_f64;
-        table[Opcode::ADD_I8 as usize] = op_add_i8;
-        table[Opcode::ADD_I16 as usize] = op_add_i16;
-        table[Opcode::ADD_I32 as usize] = op_add_i32;
-        table[Opcode::ADD_I64 as usize] = op_add_i64;
-        table[Opcode::SUB_I8 as usize] = op_sub_i8;
-        table[Opcode::SUB_I16 as usize] = op_sub_i16;
-        table[Opcode::SUB_I32 as usize] = op_sub_i32;
-        table[Opcode::SUB_I64 as usize] = op_sub_i64;
-        table[Opcode::MUL_I8 as usize] = op_mul_i8;
-        table[Opcode::MUL_I16 as usize] = op_mul_i16;
-        table[Opcode::MUL_I32 as usize] = op_mul_i32;
-        table[Opcode::MUL_I64 as usize] = op_mul_i64;
-        table[Opcode::DIV_I8 as usize] = op_div_i8;
-        table[Opcode::DIV_I16 as usize] = op_div_i16;
-        table[Opcode::DIV_I32 as usize] = op_div_i32;
-        table[Opcode::DIV_I64 as usize] = op_div_i64;
-        table[Opcode::MOD_I8 as usize] = op_mod_i8;
-        table[Opcode::MOD_I16 as usize] = op_mod_i16;
-        table[Opcode::MOD_I32 as usize] = op_mod_i32;
-        table[Opcode::MOD_I64 as usize] = op_mod_i64;
-        table[Opcode::NEG_I8 as usize] = op_neg_i8;
-        table[Opcode::NEG_I16 as usize] = op_neg_i16;
-        table[Opcode::NEG_I32 as usize] = op_neg_i32;
-        table[Opcode::NEG_I64 as usize] = op_neg_i64;
-        table[Opcode::ADD_U8 as usize] = op_add_u8;
-        table[Opcode::ADD_U16 as usize] = op_add_u16;
-        table[Opcode::ADD_U32 as usize] = op_add_u32;
-        table[Opcode::ADD_U64 as usize] = op_add_u64;
-        table[Opcode::SUB_U8 as usize] = op_sub_u8;
-        table[Opcode::SUB_U16 as usize] = op_sub_u16;
-        table[Opcode::SUB_U32 as usize] = op_sub_u32;
-        table[Opcode::SUB_U64 as usize] = op_sub_u64;
-        table[Opcode::MUL_U8 as usize] = op_mul_u8;
-        table[Opcode::MUL_U16 as usize] = op_mul_u16;
-        table[Opcode::MUL_U32 as usize] = op_mul_u32;
-        table[Opcode::MUL_U64 as usize] = op_mul_u64;
-        table[Opcode::DIV_U8 as usize] = op_div_u8;
-        table[Opcode::DIV_U16 as usize] = op_div_u16;
-        table[Opcode::DIV_U32 as usize] = op_div_u32;
-        table[Opcode::DIV_U64 as usize] = op_div_u64;
-        table[Opcode::MOD_U8 as usize] = op_mod_u8;
-        table[Opcode::MOD_U16 as usize] = op_mod_u16;
-        table[Opcode::MOD_U32 as usize] = op_mod_u32;
-        table[Opcode::MOD_U64 as usize] = op_mod_u64;
-        table[Opcode::ADD_F32 as usize] = op_add_f32;
-        table[Opcode::ADD_F64 as usize] = op_add_f64;
-        table[Opcode::SUB_F32 as usize] = op_sub_f32;
-        table[Opcode::SUB_F64 as usize] = op_sub_f64;
-        table[Opcode::MUL_F32 as usize] = op_mul_f32;
-        table[Opcode::MUL_F64 as usize] = op_mul_f64;
-        table[Opcode::DIV_F32 as usize] = op_div_f32;
-        table[Opcode::DIV_F64 as usize] = op_div_f64;
-        table[Opcode::NEG_F32 as usize] = op_neg_f32;
-        table[Opcode::NEG_F64 as usize] = op_neg_f64;
-        table[Opcode::AND_I8 as usize] = op_and_i8;
-        table[Opcode::AND_I16 as usize] = op_and_i16;
-        table[Opcode::AND_I32 as usize] = op_and_i32;
-        table[Opcode::AND_I64 as usize] = op_and_i64;
-        table[Opcode::OR_I8 as usize] = op_or_i8;
-        table[Opcode::OR_I16 as usize] = op_or_i16;
-        table[Opcode::OR_I32 as usize] = op_or_i32;
-        table[Opcode::OR_I64 as usize] = op_or_i64;
-        table[Opcode::XOR_I8 as usize] = op_xor_i8;
-        table[Opcode::XOR_I16 as usize] = op_xor_i16;
-        table[Opcode::XOR_I32 as usize] = op_xor_i32;
-        table[Opcode::XOR_I64 as usize] = op_xor_i64;
-        table[Opcode::NOT_I8 as usize] = op_not_i8;
-        table[Opcode::NOT_I16 as usize] = op_not_i16;
-        table[Opcode::NOT_I32 as usize] = op_not_i32;
-        table[Opcode::NOT_I64 as usize] = op_not_i64;
-        table[Opcode::SHL_I8 as usize] = op_shl_i8;
-        table[Opcode::SHL_I16 as usize] = op_shl_i16;
-        table[Opcode::SHL_I32 as usize] = op_shl_i32;
-        table[Opcode::SHL_I64 as usize] = op_shl_i64;
-        table[Opcode::SHR_I8 as usize] = op_shr_i8;
-        table[Opcode::SHR_I16 as usize] = op_shr_i16;
-        table[Opcode::SHR_I32 as usize] = op_shr_i32;
-        table[Opcode::SHR_I64 as usize] = op_shr_i64;
-        table[Opcode::USHR_I8 as usize] = op_ushr_i8;
-        table[Opcode::USHR_I16 as usize] = op_ushr_i16;
-        table[Opcode::USHR_I32 as usize] = op_ushr_i32;
-        table[Opcode::USHR_I64 as usize] = op_ushr_i64;
-        table[Opcode::EQ_I8 as usize] = op_eq_i8;
-        table[Opcode::EQ_I16 as usize] = op_eq_i16;
-        table[Opcode::EQ_I32 as usize] = op_eq_i32;
-        table[Opcode::EQ_I64 as usize] = op_eq_i64;
-        table[Opcode::NE_I8 as usize] = op_ne_i8;
-        table[Opcode::NE_I16 as usize] = op_ne_i16;
-        table[Opcode::NE_I32 as usize] = op_ne_i32;
-        table[Opcode::NE_I64 as usize] = op_ne_i64;
-        table[Opcode::LT_I8 as usize] = op_lt_i8;
-        table[Opcode::LT_I16 as usize] = op_lt_i16;
-        table[Opcode::LT_I32 as usize] = op_lt_i32;
-        table[Opcode::LT_I64 as usize] = op_lt_i64;
-        table[Opcode::LE_I8 as usize] = op_le_i8;
-        table[Opcode::LE_I16 as usize] = op_le_i16;
-        table[Opcode::LE_I32 as usize] = op_le_i32;
-        table[Opcode::LE_I64 as usize] = op_le_i64;
-        table[Opcode::GT_I8 as usize] = op_gt_i8;
-        table[Opcode::GT_I16 as usize] = op_gt_i16;
-        table[Opcode::GT_I32 as usize] = op_gt_i32;
-        table[Opcode::GT_I64 as usize] = op_gt_i64;
-        table[Opcode::GE_I8 as usize] = op_ge_i8;
-        table[Opcode::GE_I16 as usize] = op_ge_i16;
-        table[Opcode::GE_I32 as usize] = op_ge_i32;
-        table[Opcode::GE_I64 as usize] = op_ge_i64;
-        table[Opcode::LT_U8 as usize] = op_lt_u8;
-        table[Opcode::LT_U16 as usize] = op_lt_u16;
-        table[Opcode::LT_U32 as usize] = op_lt_u32;
-        table[Opcode::LT_U64 as usize] = op_lt_u64;
-        table[Opcode::LE_U8 as usize] = op_le_u8;
-        table[Opcode::LE_U16 as usize] = op_le_u16;
-        table[Opcode::LE_U32 as usize] = op_le_u32;
-        table[Opcode::LE_U64 as usize] = op_le_u64;
-        table[Opcode::GT_U8 as usize] = op_gt_u8;
-        table[Opcode::GT_U16 as usize] = op_gt_u16;
-        table[Opcode::GT_U32 as usize] = op_gt_u32;
-        table[Opcode::GT_U64 as usize] = op_gt_u64;
-        table[Opcode::GE_U8 as usize] = op_ge_u8;
-        table[Opcode::GE_U16 as usize] = op_ge_u16;
-        table[Opcode::GE_U32 as usize] = op_ge_u32;
-        table[Opcode::GE_U64 as usize] = op_ge_u64;
-        table[Opcode::EQ_F32 as usize] = op_eq_f32;
-        table[Opcode::EQ_F64 as usize] = op_eq_f64;
-        table[Opcode::NE_F32 as usize] = op_ne_f32;
-        table[Opcode::NE_F64 as usize] = op_ne_f64;
-        table[Opcode::LT_F32 as usize] = op_lt_f32;
-        table[Opcode::LT_F64 as usize] = op_lt_f64;
-        table[Opcode::LE_F32 as usize] = op_le_f32;
-        table[Opcode::LE_F64 as usize] = op_le_f64;
-        table[Opcode::GT_F32 as usize] = op_gt_f32;
-        table[Opcode::GT_F64 as usize] = op_gt_f64;
-        table[Opcode::GE_F32 as usize] = op_ge_f32;
-        table[Opcode::GE_F64 as usize] = op_ge_f64;
-        table[Opcode::JMP as usize] = op_jmp;
-        table[Opcode::JMPIF as usize] = op_jmpif;
-        table[Opcode::JMPIFNOT as usize] = op_jmpifnot;
-        table[Opcode::TRY as usize] = op_try;
-        table[Opcode::ENDTRY as usize] = op_endtry;
-        table[Opcode::THROW as usize] = op_throw;
-        table[Opcode::GETUPVAL as usize] = op_getupval;
-        table[Opcode::CLOSURE as usize] = op_closure;
-        table[Opcode::CALL as usize] = op_call;
-        table[Opcode::RET as usize] = op_ret;
-        table[Opcode::SETUPVAL as usize] = op_setupval;
-        table[Opcode::CALLTAIL as usize] = op_calltail;
-        table[Opcode::GETG as usize] = op_getg;
-        table[Opcode::SETG as usize] = op_setg;
-        table[Opcode::CONV as usize] = op_conv;
-        table[Opcode::HALT as usize] = op_halt;
-        table[Opcode::NOP as usize] = op_nop;
-        table[Opcode::EXT as usize] = op_ext;
-        table
-    })
-}
-
-// ── Safety contract for union field access in macros ──────────────
-//
-// All macros below use `unsafe { $vm.scalar(reg)?.$field }` to read a
-// named field from a Register union.  This is sound because:
-//
-//  * The bytecode compiler emits typed opcodes.  For example, the
-//    ADD_I64 opcode is only generated when both operands were stored
-//    via Register::from_i64, so reading the `i64` field is valid.
-//
-//  * The LOAD/STORE macros read `ptr` for address operands.  The
-//    compiler guarantees address registers were written via from_ptr.
-//
-//  * The cmpop macros read a specific field and then write a bool
-//    (u64 field), which is always a valid reinterpretation since bool
-//    only distinguishes zero / non-zero.
-
-macro_rules! scalar_binop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        let vc = unsafe { $vm.scalar_unchecked(c).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.$method(vc))); }
-    }};
-}
-
-macro_rules! float_binop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident, $op:tt) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        let vc = unsafe { $vm.scalar_unchecked(c).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb $op vc)); }
-    }};
-}
-
-macro_rules! int_divop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        let vc = unsafe { $vm.scalar_unchecked(c).$field };
-        if vc == 0 {
-            return Err(VMError::DivisionByZero);
-        }
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.$method(vc))); }
-    }};
-}
-
-macro_rules! int_negop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
-        let (a, b) = ($instr.a(), $instr.b());
-        // SAFETY: typed opcodes guarantee register b was written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.wrapping_neg())); }
-    }};
-}
-
-macro_rules! float_negop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
-        let (a, b) = ($instr.a(), $instr.b());
-        // SAFETY: typed opcodes guarantee register b was written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(-vb)); }
-    }};
-}
-
-macro_rules! cmpop {
-    ($vm:ident, $instr:ident, $field:ident, $op:tt) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        let vc = unsafe { $vm.scalar_unchecked(c).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::from_bool(vb $op vc)); }
-    }};
-}
-
-macro_rules! bitop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident, $op:tt) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        let vc = unsafe { $vm.scalar_unchecked(c).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb $op vc)); }
-    }};
-}
-
-macro_rules! notop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident) => {{
-        let (a, b) = ($instr.a(), $instr.b());
-        // SAFETY: typed opcodes guarantee register b was written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(!vb)); }
-    }};
-}
-
-macro_rules! shiftop {
-    ($vm:ident, $instr:ident, $field:ident, $from:ident, $method:ident) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        // SAFETY: typed opcodes guarantee registers b,c were written by from_<type>;
-        // register indices and frame existence validated at compile/load time
-        let vb = unsafe { $vm.scalar_unchecked(b).$field };
-        let vc = unsafe { $vm.scalar_unchecked(c).$field };
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(vb.$method(vc as u32))); }
-    }};
-}
-
-macro_rules! load_macro {
-    ($vm:ident, $instr:ident, $typ:ty, $from:ident) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        let pc = unsafe { $vm.stack.current_unchecked() }.pc.wrapping_sub(1);
-        let base = unsafe { $vm.scalar_unchecked(b).ptr };
-        let addr = base
-            .checked_add(c as usize)
-                .ok_or(VMError::MemoryOutOfBounds {
-                    pc,
-                    addr: base,
-                    size: size_of::<$typ>(),
-                })?;
-            let value = $vm
-                .memory
-                .read_checked::<$typ>(addr)
-                .ok_or(VMError::MemoryOutOfBounds {
-                    pc,
-                    addr,
-                    size: size_of::<$typ>(),
-                })?;
-        unsafe { $vm.set_scalar_unchecked(a, Register::$from(value)); }
-    }};
-}
-
-macro_rules! store_macro {
-    ($vm:ident, $instr:ident, $field:ident, $typ:ty) => {{
-        let (a, b, c) = ($instr.a(), $instr.b(), $instr.c());
-        let pc = unsafe { $vm.stack.current_unchecked() }.pc.wrapping_sub(1);
-        let base = unsafe { $vm.scalar_unchecked(a).ptr };
-        let addr = base
-            .checked_add(b as usize)
-            .ok_or(VMError::MemoryOutOfBounds {
-                pc,
-                addr: base,
-                size: size_of::<$typ>(),
-            })?;
-        let value = unsafe { $vm.scalar_unchecked(c).$field };
-        if !$vm.memory.write_checked::<$typ>(addr, value) {
-            return Err(VMError::MemoryOutOfBounds {
-                pc,
-                addr,
-                size: size_of::<$typ>(),
-            });
-        }
-    }};
-}
-
 fn convert_register(src: Register, from: ValueType, to: ValueType) -> Register {
-    // SAFETY: Each match arm reads the union field that corresponds to the
-    // ValueType variant. The bytecode compiler ensures that from matches the
-    // last field written to src. Reading any valid field and casting to i64
-    // is sound because all fields occupy the same 64-bit storage.
     let as_i64: i64 = unsafe {
         match from {
             ValueType::I8 => src.i8 as i64,
@@ -412,579 +58,6 @@ fn convert_register(src: Register, from: ValueType, to: ValueType) -> Register {
         ValueType::Bool => Register::from_bool(as_i64 != 0),
         ValueType::Ptr => Register::from_ptr(as_i64 as usize),
     }
-}
-
-// ── Opcode handler functions ──────────────────────────────────────
-
-fn op_halt(_vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    Err(VMError::Halted)
-}
-
-fn op_nop(_vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    Ok(())
-}
-
-fn op_ext(_vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    Err(VMError::NativeError(
-        "unexpected EXT in execute (should have been handled by fetch)".to_string(),
-    ))
-}
-
-fn op_loadk(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
-    let bx = if ext != 0 {
-        (instr.bx() as u32 | ext) as usize
-    } else {
-        instr.bx() as usize
-    };
-    let constant = vm.module()?
-        .constants
-        .get(bx)
-        .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
-        .clone();
-    match constant {
-        Constant::Bytes(_) => {
-            let offset = vm.constant_section.get(&bx)
-                .copied()
-                .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-            vm.set_scalar(instr.a(), Register::from_ptr(offset))?;
-        }
-        constant => vm.set_scalar(
-            instr.a(),
-            Register {
-                bits: constant
-                    .to_bits()
-                    .expect("non-bytes constants always have scalar bits"),
-            },
-        )?,
-    }
-    Ok(())
-}
-
-fn op_move(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let a = instr.a();
-    let b = instr.b();
-    let src_val;
-    {
-        let frame = unsafe { vm.stack.current_unchecked() };
-        let val = unsafe { frame.get_unchecked(b) };
-        if let VmValue::Scalar(r) = val {
-            src_val = VmValue::scalar(*r);
-        } else {
-            src_val = val.clone();
-        }
-    }
-    let frame = unsafe { vm.stack.current_mut_unchecked() };
-    unsafe { frame.set_unchecked(a, src_val); }
-    Ok(())
-}
-
-fn op_load_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, i8, from_i8);
-    Ok(())
-}
-fn op_load_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, i16, from_i16);
-    Ok(())
-}
-fn op_load_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, i32, from_i32);
-    Ok(())
-}
-fn op_load_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, i64, from_i64);
-    Ok(())
-}
-fn op_load_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, u8, from_u8);
-    Ok(())
-}
-fn op_load_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, u16, from_u16);
-    Ok(())
-}
-fn op_load_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, u32, from_u32);
-    Ok(())
-}
-fn op_load_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, u64, from_u64);
-    Ok(())
-}
-fn op_load_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, f32, from_f32);
-    Ok(())
-}
-fn op_load_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    load_macro!(vm, instr, f64, from_f64);
-    Ok(())
-}
-
-fn op_store_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, i8, i8);
-    Ok(())
-}
-fn op_store_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, i16, i16);
-    Ok(())
-}
-fn op_store_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, i32, i32);
-    Ok(())
-}
-fn op_store_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, i64, i64);
-    Ok(())
-}
-fn op_store_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, u8, u8);
-    Ok(())
-}
-fn op_store_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, u16, u16);
-    Ok(())
-}
-fn op_store_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, u32, u32);
-    Ok(())
-}
-fn op_store_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, u64, u64);
-    Ok(())
-}
-fn op_store_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, f32, f32);
-    Ok(())
-}
-fn op_store_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    store_macro!(vm, instr, f64, f64);
-    Ok(())
-}
-
-// Signed integer arithmetic
-fn op_add_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i8, from_i8, wrapping_add); Ok(()) }
-fn op_add_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i16, from_i16, wrapping_add); Ok(()) }
-fn op_add_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i32, from_i32, wrapping_add); Ok(()) }
-fn op_add_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i64, from_i64, wrapping_add); Ok(()) }
-fn op_sub_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i8, from_i8, wrapping_sub); Ok(()) }
-fn op_sub_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i16, from_i16, wrapping_sub); Ok(()) }
-fn op_sub_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i32, from_i32, wrapping_sub); Ok(()) }
-fn op_sub_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i64, from_i64, wrapping_sub); Ok(()) }
-fn op_mul_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i8, from_i8, wrapping_mul); Ok(()) }
-fn op_mul_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i16, from_i16, wrapping_mul); Ok(()) }
-fn op_mul_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i32, from_i32, wrapping_mul); Ok(()) }
-fn op_mul_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, i64, from_i64, wrapping_mul); Ok(()) }
-fn op_div_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i8, from_i8, wrapping_div); Ok(()) }
-fn op_div_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i16, from_i16, wrapping_div); Ok(()) }
-fn op_div_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i32, from_i32, wrapping_div); Ok(()) }
-fn op_div_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i64, from_i64, wrapping_div); Ok(()) }
-fn op_mod_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i8, from_i8, wrapping_rem); Ok(()) }
-fn op_mod_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i16, from_i16, wrapping_rem); Ok(()) }
-fn op_mod_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i32, from_i32, wrapping_rem); Ok(()) }
-fn op_mod_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, i64, from_i64, wrapping_rem); Ok(()) }
-fn op_neg_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i8, from_i8); Ok(()) }
-fn op_neg_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i16, from_i16); Ok(()) }
-fn op_neg_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i32, from_i32); Ok(()) }
-fn op_neg_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_negop!(vm, instr, i64, from_i64); Ok(()) }
-
-// Unsigned integer arithmetic
-fn op_add_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u8, from_u8, wrapping_add); Ok(()) }
-fn op_add_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u16, from_u16, wrapping_add); Ok(()) }
-fn op_add_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u32, from_u32, wrapping_add); Ok(()) }
-fn op_add_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u64, from_u64, wrapping_add); Ok(()) }
-fn op_sub_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u8, from_u8, wrapping_sub); Ok(()) }
-fn op_sub_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u16, from_u16, wrapping_sub); Ok(()) }
-fn op_sub_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u32, from_u32, wrapping_sub); Ok(()) }
-fn op_sub_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u64, from_u64, wrapping_sub); Ok(()) }
-fn op_mul_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u8, from_u8, wrapping_mul); Ok(()) }
-fn op_mul_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u16, from_u16, wrapping_mul); Ok(()) }
-fn op_mul_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u32, from_u32, wrapping_mul); Ok(()) }
-fn op_mul_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { scalar_binop!(vm, instr, u64, from_u64, wrapping_mul); Ok(()) }
-fn op_div_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u8, from_u8, wrapping_div); Ok(()) }
-fn op_div_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u16, from_u16, wrapping_div); Ok(()) }
-fn op_div_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u32, from_u32, wrapping_div); Ok(()) }
-fn op_div_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u64, from_u64, wrapping_div); Ok(()) }
-fn op_mod_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u8, from_u8, wrapping_rem); Ok(()) }
-fn op_mod_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u16, from_u16, wrapping_rem); Ok(()) }
-fn op_mod_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u32, from_u32, wrapping_rem); Ok(()) }
-fn op_mod_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { int_divop!(vm, instr, u64, from_u64, wrapping_rem); Ok(()) }
-
-// Float arithmetic
-fn op_add_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, +); Ok(()) }
-fn op_add_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, +); Ok(()) }
-fn op_sub_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, -); Ok(()) }
-fn op_sub_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, -); Ok(()) }
-fn op_mul_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, *); Ok(()) }
-fn op_mul_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, *); Ok(()) }
-fn op_div_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f32, from_f32, /); Ok(()) }
-fn op_div_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_binop!(vm, instr, f64, from_f64, /); Ok(()) }
-fn op_neg_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_negop!(vm, instr, f32, from_f32); Ok(()) }
-fn op_neg_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { float_negop!(vm, instr, f64, from_f64); Ok(()) }
-
-// Bitwise ops
-fn op_and_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i8, from_i8, &); Ok(()) }
-fn op_and_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i16, from_i16, &); Ok(()) }
-fn op_and_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i32, from_i32, &); Ok(()) }
-fn op_and_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i64, from_i64, &); Ok(()) }
-fn op_or_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i8, from_i8, |); Ok(()) }
-fn op_or_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i16, from_i16, |); Ok(()) }
-fn op_or_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i32, from_i32, |); Ok(()) }
-fn op_or_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i64, from_i64, |); Ok(()) }
-fn op_xor_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i8, from_i8, ^); Ok(()) }
-fn op_xor_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i16, from_i16, ^); Ok(()) }
-fn op_xor_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i32, from_i32, ^); Ok(()) }
-fn op_xor_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { bitop!(vm, instr, i64, from_i64, ^); Ok(()) }
-fn op_not_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i8, from_i8); Ok(()) }
-fn op_not_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i16, from_i16); Ok(()) }
-fn op_not_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i32, from_i32); Ok(()) }
-fn op_not_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { notop!(vm, instr, i64, from_i64); Ok(()) }
-fn op_shl_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i8, from_i8, wrapping_shl); Ok(()) }
-fn op_shl_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i16, from_i16, wrapping_shl); Ok(()) }
-fn op_shl_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i32, from_i32, wrapping_shl); Ok(()) }
-fn op_shl_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i64, from_i64, wrapping_shl); Ok(()) }
-fn op_shr_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i8, from_i8, wrapping_shr); Ok(()) }
-fn op_shr_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i16, from_i16, wrapping_shr); Ok(()) }
-fn op_shr_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i32, from_i32, wrapping_shr); Ok(()) }
-fn op_shr_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, i64, from_i64, wrapping_shr); Ok(()) }
-fn op_ushr_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u8, from_u8, wrapping_shr); Ok(()) }
-fn op_ushr_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u16, from_u16, wrapping_shr); Ok(()) }
-fn op_ushr_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u32, from_u32, wrapping_shr); Ok(()) }
-fn op_ushr_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { shiftop!(vm, instr, u64, from_u64, wrapping_shr); Ok(()) }
-
-// Signed comparisons
-fn op_eq_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, ==); Ok(()) }
-fn op_eq_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, ==); Ok(()) }
-fn op_eq_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, ==); Ok(()) }
-fn op_eq_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, ==); Ok(()) }
-fn op_ne_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, !=); Ok(()) }
-fn op_ne_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, !=); Ok(()) }
-fn op_ne_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, !=); Ok(()) }
-fn op_ne_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, !=); Ok(()) }
-fn op_lt_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, <); Ok(()) }
-fn op_lt_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, <); Ok(()) }
-fn op_lt_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, <); Ok(()) }
-fn op_lt_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, <); Ok(()) }
-fn op_le_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, <=); Ok(()) }
-fn op_le_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, <=); Ok(()) }
-fn op_le_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, <=); Ok(()) }
-fn op_le_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, <=); Ok(()) }
-fn op_gt_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, >); Ok(()) }
-fn op_gt_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, >); Ok(()) }
-fn op_gt_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, >); Ok(()) }
-fn op_gt_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, >); Ok(()) }
-fn op_ge_i8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i8, >=); Ok(()) }
-fn op_ge_i16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i16, >=); Ok(()) }
-fn op_ge_i32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i32, >=); Ok(()) }
-fn op_ge_i64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, i64, >=); Ok(()) }
-
-// Unsigned comparisons
-fn op_lt_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, <); Ok(()) }
-fn op_lt_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, <); Ok(()) }
-fn op_lt_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, <); Ok(()) }
-fn op_lt_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, <); Ok(()) }
-fn op_le_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, <=); Ok(()) }
-fn op_le_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, <=); Ok(()) }
-fn op_le_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, <=); Ok(()) }
-fn op_le_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, <=); Ok(()) }
-fn op_gt_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, >); Ok(()) }
-fn op_gt_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, >); Ok(()) }
-fn op_gt_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, >); Ok(()) }
-fn op_gt_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, >); Ok(()) }
-fn op_ge_u8(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u8, >=); Ok(()) }
-fn op_ge_u16(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u16, >=); Ok(()) }
-fn op_ge_u32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u32, >=); Ok(()) }
-fn op_ge_u64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, u64, >=); Ok(()) }
-
-// Float comparisons
-fn op_eq_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, ==); Ok(()) }
-fn op_eq_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, ==); Ok(()) }
-fn op_ne_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, !=); Ok(()) }
-fn op_ne_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, !=); Ok(()) }
-fn op_lt_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, <); Ok(()) }
-fn op_lt_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, <); Ok(()) }
-fn op_le_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, <=); Ok(()) }
-fn op_le_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, <=); Ok(()) }
-fn op_gt_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, >); Ok(()) }
-fn op_gt_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, >); Ok(()) }
-fn op_ge_f32(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f32, >=); Ok(()) }
-fn op_ge_f64(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> { cmpop!(vm, instr, f64, >=); Ok(()) }
-
-// Jumps
-fn op_jmp(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
-    let offset = if ext != 0 {
-        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32 | (ext as i32);
-        effective_offset as i16
-    } else {
-        instr.sbx_ab()
-    };
-    vm.jump(offset - 1)?;
-    Ok(())
-}
-
-fn op_jmpif(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
-    let offset = if ext != 0 {
-        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32 | (ext as i32);
-        effective_offset as i16
-    } else {
-        instr.sbx()
-    };
-    // SAFETY: scalar_unchecked returns a Register; reading u64 from any
-    // Register is sound since all fields occupy the same 64 bits
-    if unsafe { vm.scalar_unchecked(instr.a()).u64 } != 0 {
-        vm.jump(offset - 1)?;
-    }
-    Ok(())
-}
-
-fn op_jmpifnot(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
-    let offset = if ext != 0 {
-        let effective_offset = ((instr.a() as u16 as i16) | ((instr.b() as i16) << 8)) as i32 | (ext as i32);
-        effective_offset as i16
-    } else {
-        instr.sbx()
-    };
-    // SAFETY: scalar_unchecked returns a Register; reading u64 from any
-    // Register is sound since all fields occupy the same 64 bits
-    if unsafe { vm.scalar_unchecked(instr.a()).u64 } == 0 {
-        vm.jump(offset - 1)?;
-    }
-    Ok(())
-}
-
-// Exception handling
-fn op_try(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let offset = instr.bx() as i16 as isize;
-    let handler_pc = unsafe { vm.stack.current_unchecked()
-        .pc.wrapping_sub(1).wrapping_add(offset as usize) };
-    unsafe { vm.stack
-        .current_mut_unchecked()
-        .push_handler(handler_pc as u32); }
-    Ok(())
-}
-
-fn op_endtry(vm: &mut Vm, _instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    unsafe { vm.stack
-        .current_mut_unchecked()
-        .pop_handler(); }
-    Ok(())
-}
-
-fn op_throw(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let value = unsafe { vm.value_unchecked(instr.a()) };
-    if let Some(handler_pc) = unsafe { vm.stack.current_unchecked()
-        .current_handler() }
-    {
-        unsafe {
-            vm.stack
-                .current_mut_unchecked()
-                .pc = handler_pc as usize;
-            vm.set_value_unchecked(0, value);
-        }
-        unsafe {
-            vm.stack
-                .current_mut_unchecked()
-                .pop_handler();
-        }
-    } else {
-        vm.stack.pop_frame();
-        if vm.stack.is_empty() {
-            return Err(VMError::Runtime {
-                message: "uncaught exception".to_string(),
-                backtrace: vec![],
-            });
-        }
-        return Err(VMError::Thrown(value));
-    }
-    Ok(())
-}
-
-// Upvalues
-fn op_getupval(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let dest = instr.a();
-    let idx = instr.b() as usize;
-    let closure_reg = instr.c();
-    let value = match unsafe { vm.value_unchecked(closure_reg) } {
-        VmValue::Closure { upvalues, .. } => {
-            let upvalues = unsafe { &*upvalues.get() };
-            upvalues.get(idx).cloned()
-        }
-        _ => return Err(VMError::ExpectedFunction(closure_reg)),
-    }
-    .ok_or(VMError::InvalidRegister(idx as u8))?;
-    unsafe { vm.set_value_unchecked(dest, value); }
-    Ok(())
-}
-
-fn op_setupval(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let src = instr.a();
-    let idx = instr.b() as usize;
-    let closure_reg = instr.c();
-    let value = unsafe { vm.value_unchecked(src) };
-    let frame = unsafe { vm
-        .stack
-        .current_mut_unchecked() };
-    let slot = unsafe { frame
-        .get_mut_unchecked(closure_reg) };
-    match slot {
-        VmValue::Closure { upvalues, .. } => {
-            let upvalues = unsafe { &mut *upvalues.get() };
-            if idx >= upvalues.len() {
-                return Err(VMError::InvalidRegister(idx as u8));
-            }
-            upvalues[idx] = value;
-        }
-        _ => return Err(VMError::ExpectedFunction(closure_reg)),
-    }
-    Ok(())
-}
-
-// Closure
-fn op_closure(vm: &mut Vm, instr: Instruction, ext: u32) -> Result<(), VMError> {
-    let upvalue_count = instr.c() as usize;
-    let callable_idx = if ext != 0 {
-        (instr.b() as u32 | (ext >> 16)) as usize
-    } else {
-        instr.b() as usize
-    };
-    let closure = {
-        let module = vm.module()?;
-        match module
-            .callables
-            .get(callable_idx)
-            .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
-        {
-            Callable::Function(function_id) => {
-                let function = module
-                    .functions
-                    .get(*function_id as usize)
-                    .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
-                let mut upvalues = Vec::with_capacity(upvalue_count);
-                let frame = unsafe { vm.stack.current_unchecked() };
-                let reg_count = frame.chunk.max_registers as usize;
-                for i in 0..upvalue_count {
-                    let reg_idx = reg_count - upvalue_count + i;
-                    upvalues.push(
-                        unsafe { frame
-                            .get_unchecked(reg_idx as u8) }
-                            .clone(),
-                    );
-                }
-                VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
-            }
-            Callable::Import(import_idx) => {
-                let import_decl = module
-                    .imports
-                    .get(*import_idx as usize)
-                    .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
-                let resolved = vm
-                    .linker
-                    .resolve(import_decl)
-                    .ok_or_else(|| {
-                        VMError::UnresolvedNativeImport(import_decl.to_string())
-                    })?;
-                VmValue::native_import(resolved)
-            }
-        }
-    };
-    vm.set_value(instr.a(), closure)?;
-    Ok(())
-}
-
-// Call / Return
-fn op_call(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    vm.call(instr.a(), instr.b(), instr.c())
-}
-
-fn op_ret(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    vm.ret(instr.a(), instr.b())
-}
-
-// Tail call
-fn op_calltail(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let base = instr.a();
-    let arg_count = instr.b();
-
-    let mut args = Vec::with_capacity(arg_count as usize);
-    for index in 0..arg_count {
-        let src = base
-            .checked_add(1)
-            .and_then(|v| v.checked_add(index))
-            .ok_or(VMError::InvalidRegister(base))?;
-        args.push(unsafe { vm.value_unchecked(src) });
-    }
-
-    let callable = unsafe { vm.value_unchecked(base) };
-
-    if let Some(function) = callable.as_function() {
-        let frame = unsafe { vm.stack.current_mut_unchecked() };
-        frame.set_chunk(function);
-        frame.pc = 0;
-        for (i, arg) in args.into_iter().enumerate() {
-            unsafe { frame.set_unchecked(i as u8, arg); }
-        }
-        // Store function reference for nested CALLTAIL
-        unsafe { frame.set_unchecked(arg_count, callable); }
-    } else if let Some(idx) = callable.as_native_import() {
-        let returns = vm
-            .linker
-            .call(idx, &args, &mut vm.memory)
-            .map_err(|e| VMError::NativeError(e.message))?;
-        for (i, val) in returns.into_iter().enumerate() {
-            let tgt = base
-                .checked_add(i as u8)
-                .ok_or(VMError::InvalidRegister(base))?;
-            unsafe { vm.set_value_unchecked(tgt, val); }
-        }
-        return vm.ret(base, 0);
-    } else if let Some(closure) = callable.as_closure() {
-        let (chunk, _upvalues) = closure;
-        let frame = unsafe { vm.stack.current_mut_unchecked() };
-        frame.set_chunk(chunk.clone());
-        frame.pc = 0;
-        for (i, arg) in args.into_iter().enumerate() {
-            unsafe { frame.set_unchecked(i as u8, arg); }
-        }
-    } else {
-        return Err(VMError::ExpectedFunction(base));
-    }
-    Ok(())
-}
-
-// Globals
-fn op_getg(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let value = vm
-        .globals
-        .get(instr.bx() as usize)
-        .cloned()
-        .unwrap_or_default();
-    vm.set_value(instr.a(), value)?;
-    Ok(())
-}
-
-fn op_setg(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    const MAX_GLOBALS: usize = 256;
-    let gx = instr.bx() as usize;
-    if gx >= MAX_GLOBALS {
-        return Err(VMError::NativeError("global index out of range".to_string()));
-    }
-    let value = unsafe { vm.value_unchecked(instr.a()) };
-    if gx >= vm.globals.len() {
-        vm.globals.resize(gx + 1, VmValue::default());
-    }
-    vm.globals[gx] = value;
-    Ok(())
-}
-
-// Conversion
-fn op_conv(vm: &mut Vm, instr: Instruction, _ext: u32) -> Result<(), VMError> {
-    let from_type = instr.c() >> 4;
-    let to_type = instr.c() & 0x0F;
-    let from = ValueType::from_byte(from_type)
-        .ok_or(VMError::InvalidConversionType(from_type))?;
-    let to =
-        ValueType::from_byte(to_type).ok_or(VMError::InvalidConversionType(to_type))?;
-    let result = convert_register(unsafe { vm.scalar_unchecked(instr.b()) }, from, to);
-    vm.set_scalar(instr.a(), result)?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1067,7 +140,7 @@ impl Vm {
     pub fn run(&mut self, chunk: Chunk) -> Result<(), VMError> {
         let mut module = Module::new("<chunk>");
         module.entry = Some(0);
-        module.functions.push(Function { 
+        module.functions.push(Function {
             name: "main".to_string(),
             chunk,
         });
@@ -1096,8 +169,6 @@ impl Vm {
                 crate::vm::stack::MAX_REGISTERS
             )));
         }
-        // Pre-load Bytes constants into VM memory at startup.
-        // Offsets are stored (not raw pointers) to survive Vec reallocations.
         self.constant_section.clear();
         for (idx, constant) in module.constants.iter().enumerate() {
             if let Constant::Bytes(bytes) = constant {
@@ -1112,85 +183,1606 @@ impl Vm {
         self.module = Some(Rc::new(module));
         self.stack.push_entry(Rc::new(entry), entry_name);
 
-        let dispatch = dispatch_table();
-
-        loop {
-            let frame = unsafe { self.stack.current_unchecked() };
-            if frame.pc >= frame.code_len {
+        // Inline match dispatch loop
+        'execute: loop {
+            let frame_pc = unsafe { self.stack.current_unchecked().pc };
+            let code_len = unsafe { self.stack.current_unchecked().code_len };
+            if frame_pc >= code_len {
                 return Ok(());
             }
+            let instr = unsafe { *self.stack.current_unchecked().code_ptr.add(frame_pc) };
+            let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
 
-            // Fetch instruction, handle EXT inline
-            let mut instr = unsafe { *frame.code_ptr.add(frame.pc) };
-            let mut extended_bits: u32 = 0;
-
-            if instr.opcode_byte == Opcode::EXT as u8 {
-                let extra = ((instr.c as u16) << 8) | instr.b as u16;
+            // Handle EXT prefix
+            let (opcode_byte, extended_bits, error_pc) = if instr.opcode_byte == Opcode::EXT as u8 {
                 unsafe { self.stack.current_mut_unchecked() }.pc += 1;
-                let frame = unsafe { self.stack.current_unchecked() };
-                if frame.pc >= frame.code_len {
-                    return Err(VMError::InvalidProgramCounter { pc: frame.pc, len: frame.code_len });
+                let next_pc = frame_pc + 1;
+                if next_pc >= code_len {
+                    return Err(VMError::InvalidProgramCounter { pc: next_pc, len: code_len });
                 }
-                instr = unsafe { *frame.code_ptr.add(frame.pc) };
-                extended_bits = (extra as u32) << 16;
-            }
-
+                let next = unsafe { self.stack.current_unchecked().code_ptr.add(next_pc).read() };
+                let extra = ((instr.c as u16) << 8) | instr.b as u16;
+                (next.opcode_byte, (extra as u32) << 16, next_pc)
+            } else {
+                (instr.opcode_byte, 0, frame_pc)
+            };
             unsafe { self.stack.current_mut_unchecked() }.pc += 1;
 
-            let handler = dispatch[instr.opcode_byte as usize];
-            match handler(self, instr, extended_bits) {
-                Ok(()) => {}
-                Err(VMError::Halted) => {
-                    self.stack.pop_frame();
-                    self.module = None;
-                    return Ok(());
-                }
-                Err(VMError::Thrown(value)) => {
-                    if let Some(handler_pc) = unsafe {
-                        self.stack
-                            .current_unchecked()
-                            .current_handler()
-                    } {
+            let effective_bx = instr.bx() as u32 | extended_bits;
+            let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
+
+            let regs_ptr = unsafe {
+                self.stack.current_unchecked().registers.as_ptr() as *mut VmValue
+            };
+
+            match opcode_byte {
+                    // LOADK
+                    0x00 => {
+                        let bx = if extended_bits != 0 { effective_bx as usize } else { instr.bx() as usize };
+                        let constant = self.module.as_ref().unwrap()
+                            .constants
+                            .get(bx)
+                            .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
+                            .clone();
                         unsafe {
-                            self.stack
-                                .current_mut_unchecked()
-                                .pc = handler_pc as usize;
-                            self.set_value_unchecked(0, value);
+                            let frame = self.stack.current_mut_unchecked();
+                            match constant {
+                                Constant::Bytes(_) => {
+                                    let offset = self.constant_section.get(&bx)
+                                        .copied()
+                                        .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
+                                    if !frame.set(instr.a, VmValue::scalar(Register::from_ptr(offset))) {
+                                        return Err(VMError::InvalidRegister(instr.a));
+                                    }
+                                }
+                                constant => {
+                                    if !frame.set(instr.a, VmValue::scalar(Register { bits: constant.to_bits().expect("non-bytes constants always have scalar bits") })) {
+                                        return Err(VMError::InvalidRegister(instr.a));
+                                    }
+                                }
+                            }
                         }
+                        continue 'execute;
+                    }
+                    // MOVE
+                    0x01 => {
+                        let src = unsafe { &*regs_ptr.add(instr.b as usize) };
+                        let val: Register = match src {
+                            VmValue::Scalar(r) => *r,
+                            _ => {
+                                let cloned = src.clone();
+                                unsafe {
+                                    let frame = self.stack.current_mut_unchecked();
+                                    if !frame.set(instr.a, cloned) {
+                                        return Err(VMError::InvalidRegister(instr.a));
+                                    }
+                                }
+                                continue 'execute;
+                            }
+                        };
                         unsafe {
-                            self.stack
-                                .current_mut_unchecked()
-                                .pop_handler();
+                            let frame = self.stack.current_mut_unchecked();
+                            if !frame.set(instr.a, VmValue::scalar(val)) {
+                                return Err(VMError::InvalidRegister(instr.a));
+                            }
                         }
-                        continue;
-                    } else {
-                        self.stack.pop_frame();
-                        if self.stack.is_empty() {
-                            return Err(VMError::Runtime {
-                                message: "uncaught exception".to_string(),
-                                backtrace: vec![],
+                        continue 'execute;
+                    }
+                    // LOAD_I8
+                    0x02 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i8>(),
+                        })?;
+                        let value = self.memory.read_checked::<i8>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<i8>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_I16
+                    0x03 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i16>(),
+                        })?;
+                        let value = self.memory.read_checked::<i16>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<i16>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_I32
+                    0x04 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i32>(),
+                        })?;
+                        let value = self.memory.read_checked::<i32>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<i32>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_I64
+                    0x05 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i64>(),
+                        })?;
+                        let value = self.memory.read_checked::<i64>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<i64>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_U8
+                    0x06 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u8>(),
+                        })?;
+                        let value = self.memory.read_checked::<u8>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<u8>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_U16
+                    0x07 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u16>(),
+                        })?;
+                        let value = self.memory.read_checked::<u16>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<u16>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_U32
+                    0x08 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u32>(),
+                        })?;
+                        let value = self.memory.read_checked::<u32>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<u32>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_U64
+                    0x09 => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u64>(),
+                        })?;
+                        let value = self.memory.read_checked::<u64>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<u64>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_F32
+                    0x0A => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<f32>(),
+                        })?;
+                        let value = self.memory.read_checked::<f32>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<f32>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(value)); }
+                        continue 'execute;
+                    }
+                    // LOAD_F64
+                    0x0B => {
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<f64>(),
+                        })?;
+                        let value = self.memory.read_checked::<f64>(addr).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr, size: size_of::<f64>(),
+                        })?;
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(value)); }
+                        continue 'execute;
+                    }
+                    // STORE_I8
+                    0x0C => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i8>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i8 };
+                        if !self.memory.write_checked::<i8>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<i8>(),
                             });
                         }
-                        return Err(VMError::Thrown(value));
+                        continue 'execute;
                     }
-                }
-                Err(mut error) => {
-                    if !matches!(&error, VMError::Runtime { .. }) {
-                        let backtrace: Vec<FrameInfo> = self.stack.frames().iter().rev().map(|f| {
-                            FrameInfo {
-                                function_name: f.function_name.clone(),
-                                pc: f.pc,
-                                source_line: f.chunk.source_location(f.pc).map(|l| l.line),
-                            }
-                        }).collect();
-                        error = VMError::Runtime {
-                            message: format!("{error:?}"),
-                            backtrace,
+                    // STORE_I16
+                    0x0D => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i16>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i16 };
+                        if !self.memory.write_checked::<i16>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<i16>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_I32
+                    0x0E => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i32>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i32 };
+                        if !self.memory.write_checked::<i32>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<i32>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_I64
+                    0x0F => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<i64>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i64 };
+                        if !self.memory.write_checked::<i64>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<i64>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_U8
+                    0x10 => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u8>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u8 };
+                        if !self.memory.write_checked::<u8>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<u8>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_U16
+                    0x11 => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u16>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u16 };
+                        if !self.memory.write_checked::<u16>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<u16>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_U32
+                    0x12 => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u32>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u32 };
+                        if !self.memory.write_checked::<u32>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<u32>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_U64
+                    0x13 => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<u64>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u64 };
+                        if !self.memory.write_checked::<u64>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<u64>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_F32
+                    0x14 => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<f32>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f32 };
+                        if !self.memory.write_checked::<f32>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<f32>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // STORE_F64
+                    0x15 => {
+                        let a = instr.a as usize;
+                        let b = instr.b as usize;
+                        let c = instr.c as usize;
+                        let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                        let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
+                            pc: error_pc, addr: base, size: size_of::<f64>(),
+                        })?;
+                        let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f64 };
+                        if !self.memory.write_checked::<f64>(addr, value) {
+                            return Err(VMError::MemoryOutOfBounds {
+                                pc: error_pc, addr, size: size_of::<f64>(),
+                            });
+                        }
+                        continue 'execute;
+                    }
+                    // ADD_I8
+                    0x20 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // ADD_I16
+                    0x21 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // ADD_I32
+                    0x22 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // ADD_I64
+                    0x23 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_I8
+                    0x24 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_I16
+                    0x25 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_I32
+                    0x26 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_I64
+                    0x27 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_I8
+                    0x28 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_I16
+                    0x29 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_I32
+                    0x2A => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_I64
+                    0x2B => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_I8
+                    0x2C => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_I16
+                    0x2D => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_I32
+                    0x2E => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_I64
+                    0x2F => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_I8
+                    0x30 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_I16
+                    0x31 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_I32
+                    0x32 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_I64
+                    0x33 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // NEG_I8
+                    0x34 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_neg())); }
+                        continue 'execute;
+                    }
+                    // NEG_I16
+                    0x35 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_neg())); }
+                        continue 'execute;
+                    }
+                    // NEG_I32
+                    0x36 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_neg())); }
+                        continue 'execute;
+                    }
+                    // NEG_I64
+                    0x37 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_neg())); }
+                        continue 'execute;
+                    }
+                    // ADD_U8
+                    0x40 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // ADD_U16
+                    0x41 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // ADD_U32
+                    0x42 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // ADD_U64
+                    0x43 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_add(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_U8
+                    0x44 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_U16
+                    0x45 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_U32
+                    0x46 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // SUB_U64
+                    0x47 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_sub(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_U8
+                    0x48 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_U16
+                    0x49 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_U32
+                    0x4A => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // MUL_U64
+                    0x4B => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_mul(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_U8
+                    0x4C => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_U16
+                    0x4D => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_U32
+                    0x4E => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // DIV_U64
+                    0x4F => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_div(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_U8
+                    0x50 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_U16
+                    0x51 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_U32
+                    0x52 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // MOD_U64
+                    0x53 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        if vc == 0 { return Err(VMError::DivisionByZero); }
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_rem(vc))); }
+                        continue 'execute;
+                    }
+                    // ADD_F32
+                    0x58 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb + vc)); }
+                        continue 'execute;
+                    }
+                    // ADD_F64
+                    0x59 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb + vc)); }
+                        continue 'execute;
+                    }
+                    // SUB_F32
+                    0x5A => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb - vc)); }
+                        continue 'execute;
+                    }
+                    // SUB_F64
+                    0x5B => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb - vc)); }
+                        continue 'execute;
+                    }
+                    // MUL_F32
+                    0x5C => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb * vc)); }
+                        continue 'execute;
+                    }
+                    // MUL_F64
+                    0x5D => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb * vc)); }
+                        continue 'execute;
+                    }
+                    // DIV_F32
+                    0x5E => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb / vc)); }
+                        continue 'execute;
+                    }
+                    // DIV_F64
+                    0x5F => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb / vc)); }
+                        continue 'execute;
+                    }
+                    // NEG_F32
+                    0x60 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(-vb)); }
+                        continue 'execute;
+                    }
+                    // NEG_F64
+                    0x61 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(-vb)); }
+                        continue 'execute;
+                    }
+                    // AND_I8
+                    0x68 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb & vc)); }
+                        continue 'execute;
+                    }
+                    // AND_I16
+                    0x69 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb & vc)); }
+                        continue 'execute;
+                    }
+                    // AND_I32
+                    0x6A => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb & vc)); }
+                        continue 'execute;
+                    }
+                    // AND_I64
+                    0x6B => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb & vc)); }
+                        continue 'execute;
+                    }
+                    // OR_I8
+                    0x6C => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb | vc)); }
+                        continue 'execute;
+                    }
+                    // OR_I16
+                    0x6D => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb | vc)); }
+                        continue 'execute;
+                    }
+                    // OR_I32
+                    0x6E => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb | vc)); }
+                        continue 'execute;
+                    }
+                    // OR_I64
+                    0x6F => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb | vc)); }
+                        continue 'execute;
+                    }
+                    // XOR_I8
+                    0x70 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb ^ vc)); }
+                        continue 'execute;
+                    }
+                    // XOR_I16
+                    0x71 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb ^ vc)); }
+                        continue 'execute;
+                    }
+                    // XOR_I32
+                    0x72 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb ^ vc)); }
+                        continue 'execute;
+                    }
+                    // XOR_I64
+                    0x73 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb ^ vc)); }
+                        continue 'execute;
+                    }
+                    // NOT_I8
+                    0x74 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(!vb)); }
+                        continue 'execute;
+                    }
+                    // NOT_I16
+                    0x75 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(!vb)); }
+                        continue 'execute;
+                    }
+                    // NOT_I32
+                    0x76 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(!vb)); }
+                        continue 'execute;
+                    }
+                    // NOT_I64
+                    0x77 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(!vb)); }
+                        continue 'execute;
+                    }
+                    // SHL_I8
+                    0x78 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_shl(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHL_I16
+                    0x79 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_shl(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHL_I32
+                    0x7A => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_shl(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHL_I64
+                    0x7B => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_shl(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_I8
+                    0x7C => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_I16
+                    0x7D => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_I32
+                    0x7E => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_I64
+                    0x7F => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_U8
+                    0x80 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_U16
+                    0x81 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_U32
+                    0x82 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // SHR_U64
+                    0x83 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_shr(vc as u32))); }
+                        continue 'execute;
+                    }
+                    // EQ_I8
+                    0x90 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                        continue 'execute;
+                    }
+                    // EQ_I16
+                    0x91 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                        continue 'execute;
+                    }
+                    // EQ_I32
+                    0x92 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                        continue 'execute;
+                    }
+                    // EQ_I64
+                    0x93 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                        continue 'execute;
+                    }
+                    // NE_I8
+                    0x94 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                        continue 'execute;
+                    }
+                    // NE_I16
+                    0x95 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                        continue 'execute;
+                    }
+                    // NE_I32
+                    0x96 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                        continue 'execute;
+                    }
+                    // NE_I64
+                    0x97 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                        continue 'execute;
+                    }
+                    // LT_I8
+                    0x98 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LT_I16
+                    0x99 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LT_I32
+                    0x9A => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LT_I64
+                    0x9B => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LE_I8
+                    0x9C => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // LE_I16
+                    0x9D => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // LE_I32
+                    0x9E => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // LE_I64
+                    0x9F => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // GT_I8
+                    0xA0 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GT_I16
+                    0xA1 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GT_I32
+                    0xA2 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GT_I64
+                    0xA3 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GE_I8
+                    0xA4 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // GE_I16
+                    0xA5 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // GE_I32
+                    0xA6 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // GE_I64
+                    0xA7 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // LT_U8
+                    0xA8 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LT_U16
+                    0xA9 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LT_U32
+                    0xAA => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LT_U64
+                    0xAB => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LE_U8
+                    0xAC => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // LE_U16
+                    0xAD => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // LE_U32
+                    0xAE => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // LE_U64
+                    0xAF => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // GT_U8
+                    0xB0 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GT_U16
+                    0xB1 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GT_U32
+                    0xB2 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GT_U64
+                    0xB3 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GE_U8
+                    0xB4 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // GE_U16
+                    0xB5 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // GE_U32
+                    0xB6 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // GE_U64
+                    0xB7 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // EQ_F32
+                    0xB8 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                        continue 'execute;
+                    }
+                    // EQ_F64
+                    0xB9 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                        continue 'execute;
+                    }
+                    // NE_F32
+                    0xBA => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                        continue 'execute;
+                    }
+                    // NE_F64
+                    0xBB => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                        continue 'execute;
+                    }
+                    // LT_F32
+                    0xBC => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LT_F64
+                    0xBD => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                        continue 'execute;
+                    }
+                    // LE_F32
+                    0xBE => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // LE_F64
+                    0xBF => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                        continue 'execute;
+                    }
+                    // GT_F32
+                    0xC0 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GT_F64
+                    0xC1 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                        continue 'execute;
+                    }
+                    // GE_F32
+                    0xC2 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // GE_F64
+                    0xC3 => {
+                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                        continue 'execute;
+                    }
+                    // CONV
+                    0xC8 => {
+                        let from_type = instr.c >> 4;
+                        let to_type = instr.c & 0x0F;
+                        let from = ValueType::from_byte(from_type)
+                            .ok_or(VMError::InvalidConversionType(from_type))?;
+                        let to = ValueType::from_byte(to_type)
+                            .ok_or(VMError::InvalidConversionType(to_type))?;
+                        let result = convert_register(
+                            unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked() },
+                            from,
+                            to,
+                        );
+                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(result); }
+                        continue 'execute;
+                    }
+                    // JMP
+                    0xD0 => {
+                        let offset = if extended_bits != 0 {
+                            effective_offset as i16
+                        } else {
+                            instr.sbx_ab()
                         };
+                        self.stack.jump(offset - 1);
+                        continue 'execute;
                     }
-                    self.module = None;
-                    return Err(error);
-                }
+                    // JMPIF
+                    0xD1 => {
+                        let offset = if extended_bits != 0 {
+                            effective_offset as i16
+                        } else {
+                            instr.sbx()
+                        };
+                        if unsafe { (*regs_ptr.add(instr.a as usize)).as_scalar().unwrap_unchecked().u64 } != 0 {
+                            self.stack.jump(offset - 1);
+                        }
+                        continue 'execute;
+                    }
+                    // JMPIFNOT
+                    0xD2 => {
+                        let offset = if extended_bits != 0 {
+                            effective_offset as i16
+                        } else {
+                            instr.sbx()
+                        };
+                        if unsafe { (*regs_ptr.add(instr.a as usize)).as_scalar().unwrap_unchecked().u64 } == 0 {
+                            self.stack.jump(offset - 1);
+                        }
+                        continue 'execute;
+                    }
+                    // TRY
+                    0xD3 => {
+                        let offset = instr.bx() as i16 as isize;
+                        let handler_pc = error_pc.wrapping_add(offset as usize);
+                        unsafe { self.stack.current_mut_unchecked().push_handler(handler_pc as u32); }
+                        continue 'execute;
+                    }
+                    // ENDTRY
+                    0xD4 => {
+                        unsafe { self.stack.current_mut_unchecked().pop_handler(); }
+                        continue 'execute;
+                    }
+                    // THROW
+                    0xD5 => {
+                        let value = unsafe { (*regs_ptr.add(instr.a as usize)).clone() };
+                        loop {
+                            if let Some(handler_pc) = unsafe {
+                                self.stack.current_unchecked().current_handler()
+                            } {
+                                unsafe {
+                                    self.stack.current_mut_unchecked().pc = handler_pc as usize;
+                                    let rp = self.stack.current_unchecked().registers.as_ptr() as *mut VmValue;
+                                    *rp = value;
+                                    self.stack.current_mut_unchecked().pop_handler();
+                                }
+                                continue 'execute;
+                            }
+                            self.stack.pop_frame();
+                            if self.stack.is_empty() {
+                                return Err(VMError::Runtime {
+                                    message: "uncaught exception".to_string(),
+                                    backtrace: vec![],
+                                });
+                            }
+                        }
+                    }
+                    // GETUPVAL
+                    0xD6 => {
+                        let dest = instr.a as usize;
+                        let idx = instr.b as usize;
+                        let closure_reg = instr.c as usize;
+                        let value = match unsafe { &*regs_ptr.add(closure_reg) } {
+                            VmValue::Closure { upvalues, .. } => {
+                                let upvalues = unsafe { &*upvalues.get() };
+                                upvalues.get(idx).cloned()
+                            }
+                            _ => return Err(VMError::ExpectedFunction(instr.c)),
+                        }
+                        .ok_or(VMError::InvalidRegister(idx as u8))?;
+                        unsafe { *regs_ptr.add(dest) = value; }
+                        continue 'execute;
+                    }
+                    // CLOSURE
+                    0xD7 => {
+                        let upvalue_count = instr.c as usize;
+                        let callable_idx = if extended_bits != 0 {
+                            (instr.b as u32 | (extended_bits >> 16)) as usize
+                        } else {
+                            instr.b as usize
+                        };
+                        let module = self.module.as_ref().unwrap();
+                        let closure = match module
+                            .callables
+                            .get(callable_idx)
+                            .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
+                        {
+                            Callable::Function(function_id) => {
+                                let function = module
+                                    .functions
+                                    .get(*function_id as usize)
+                                    .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
+                                let mut upvalues = Vec::with_capacity(upvalue_count);
+                                let reg_count = max_regs as usize;
+                                let frame = unsafe { self.stack.current_unchecked() };
+                                for i in 0..upvalue_count {
+                                    let reg_idx = reg_count - upvalue_count + i;
+                                    upvalues.push(
+                                        unsafe { frame.get_unchecked(reg_idx as u8) }.clone(),
+                                    );
+                                }
+                                VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
+                            }
+                            Callable::Import(import_idx) => {
+                                let import_decl = module
+                                    .imports
+                                    .get(*import_idx as usize)
+                                    .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
+                                let resolved = self
+                                    .linker
+                                    .resolve(import_decl)
+                                    .ok_or_else(|| {
+                                        VMError::UnresolvedNativeImport(import_decl.to_string())
+                                    })?;
+                                VmValue::native_import(resolved)
+                            }
+                        };
+                        unsafe { *regs_ptr.add(instr.a as usize) = closure; }
+                        continue 'execute;
+                    }
+                    // CALL
+                    0xD8 => {
+                        self.call(instr.a, instr.b, instr.c)?;
+                        continue 'execute;
+                    }
+                    // RET
+                    0xD9 => {
+                        self.ret(instr.a, instr.b)?;
+                        continue 'execute;
+                    }
+                    // SETUPVAL
+                    0xDA => {
+                        let src = instr.a as usize;
+                        let idx = instr.b as usize;
+                        let value = unsafe { (*regs_ptr.add(src)).clone() };
+                        let slot = unsafe {
+                            self.stack.current_mut_unchecked().get_mut_unchecked(instr.c)
+                        };
+                        match slot {
+                            VmValue::Closure { upvalues, .. } => {
+                                let upvalues = unsafe { &mut *upvalues.get() };
+                                if idx >= upvalues.len() {
+                                    return Err(VMError::InvalidRegister(idx as u8));
+                                }
+                                upvalues[idx] = value;
+                            }
+                            _ => return Err(VMError::ExpectedFunction(instr.c)),
+                        }
+                        continue 'execute;
+                    }
+                    // CALLTAIL
+                    0xDB => {
+                        let base = instr.a;
+                        let arg_count = instr.b;
+
+                        let mut args = Vec::with_capacity(arg_count as usize);
+                        for index in 0..arg_count {
+                            let src = base
+                                .checked_add(1)
+                                .and_then(|v| v.checked_add(index))
+                                .ok_or(VMError::InvalidRegister(base))?;
+                            args.push(unsafe { (*regs_ptr.add(src as usize)).clone() });
+                        }
+
+                        let callable = unsafe { (*regs_ptr.add(base as usize)).clone() };
+
+                        if let Some(function) = callable.as_function() {
+                            let frame_mut = unsafe { self.stack.current_mut_unchecked() };
+                            frame_mut.set_chunk(function);
+                            frame_mut.pc = 0;
+                            for (i, arg) in args.into_iter().enumerate() {
+                                unsafe { frame_mut.set_unchecked(i as u8, arg); }
+                            }
+                            unsafe { frame_mut.set_unchecked(arg_count, callable); }
+                        } else if let Some(idx) = callable.as_native_import() {
+                            let returns = self
+                                .linker
+                                .call(idx, &args, &mut self.memory)
+                                .map_err(|e| VMError::NativeError(e.message))?;
+                            for (i, val) in returns.into_iter().enumerate() {
+                                let tgt = base
+                                    .checked_add(i as u8)
+                                    .ok_or(VMError::InvalidRegister(base))?;
+                                unsafe { *regs_ptr.add(tgt as usize) = val; }
+                            }
+                            return self.ret(base, 0);
+                        } else if let Some(closure) = callable.as_closure() {
+                            let (chunk, _upvalues) = closure;
+                            let frame_mut = unsafe { self.stack.current_mut_unchecked() };
+                            frame_mut.set_chunk(chunk.clone());
+                            frame_mut.pc = 0;
+                            for (i, arg) in args.into_iter().enumerate() {
+                                unsafe { frame_mut.set_unchecked(i as u8, arg); }
+                            }
+                        } else {
+                            return Err(VMError::ExpectedFunction(base));
+                        }
+                        continue 'execute;
+                    }
+                    // GETG
+                    0xE0 => {
+                        let value = self
+                            .globals
+                            .get(instr.bx() as usize)
+                            .cloned()
+                            .unwrap_or_default();
+                        unsafe { *regs_ptr.add(instr.a as usize) = value; }
+                        continue 'execute;
+                    }
+                    // SETG
+                    0xE1 => {
+                        const MAX_GLOBALS: usize = 256;
+                        let gx = instr.bx() as usize;
+                        if gx >= MAX_GLOBALS {
+                            return Err(VMError::NativeError("global index out of range".to_string()));
+                        }
+                        let value = unsafe { (*regs_ptr.add(instr.a as usize)).clone() };
+                        if gx >= self.globals.len() {
+                            self.globals.resize(gx + 1, VmValue::default());
+                        }
+                        self.globals[gx] = value;
+                        continue 'execute;
+                    }
+                    // NOP
+                    0xFE => continue 'execute,
+                    // HALT
+                    0xFF => {
+                        self.stack.pop_frame();
+                        self.module = None;
+                        return Ok(());
+                    }
+                _ => return Err(VMError::NativeError(format!("unknown opcode {}", instr.opcode_byte))),
             }
         }
     }
@@ -1231,8 +1823,1434 @@ impl Vm {
             instr
         };
 
-        let dispatch = dispatch_table();
-        dispatch[instr.opcode_byte as usize](self, instr, extended_bits)
+        let error_pc = unsafe { self.stack.current_unchecked().pc.wrapping_sub(1) };
+        let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
+        let regs_ptr = unsafe { self.stack.current_unchecked().registers.as_ptr() as *mut VmValue };
+        let effective_bx = instr.bx() as u32 | extended_bits;
+        let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
+
+        match instr.opcode_byte {
+            // LOADK
+            0x00 => {
+                let bx = if extended_bits != 0 { effective_bx as usize } else { instr.bx() as usize };
+                let constant = self.module()?
+                    .constants
+                    .get(bx)
+                    .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
+                    .clone();
+                unsafe {
+                    let frame = self.stack.current_mut_unchecked();
+                    match constant {
+                        Constant::Bytes(_) => {
+                            let offset = self.constant_section.get(&bx)
+                                .copied()
+                                .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
+                            if !frame.set(instr.a, VmValue::scalar(Register::from_ptr(offset))) {
+                                return Err(VMError::InvalidRegister(instr.a));
+                            }
+                        }
+                        constant => {
+                            if !frame.set(instr.a, VmValue::scalar(Register { bits: constant.to_bits().expect("non-bytes constants always have scalar bits") })) {
+                                return Err(VMError::InvalidRegister(instr.a));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            // MOVE
+            0x01 => {
+                let src = unsafe { &*regs_ptr.add(instr.b as usize) };
+                let val: Register = match src {
+                    VmValue::Scalar(r) => *r,
+                    _ => {
+                        let cloned = src.clone();
+                        unsafe {
+                            let frame = self.stack.current_mut_unchecked();
+                            if !frame.set(instr.a, cloned) {
+                                return Err(VMError::InvalidRegister(instr.a));
+                            }
+                        }
+                        return Ok(());
+                    }
+                };
+                unsafe {
+                    let frame = self.stack.current_mut_unchecked();
+                    if !frame.set(instr.a, VmValue::scalar(val)) {
+                        return Err(VMError::InvalidRegister(instr.a));
+                    }
+                }
+                Ok(())
+            }
+            // LOAD_I8
+            0x02 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i8>() })?;
+                let value = self.memory.read_checked::<i8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i8>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(value)); }
+                Ok(())
+            }
+            // LOAD_I16
+            0x03 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i16>() })?;
+                let value = self.memory.read_checked::<i16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i16>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(value)); }
+                Ok(())
+            }
+            // LOAD_I32
+            0x04 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i32>() })?;
+                let value = self.memory.read_checked::<i32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i32>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(value)); }
+                Ok(())
+            }
+            // LOAD_I64
+            0x05 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i64>() })?;
+                let value = self.memory.read_checked::<i64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i64>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(value)); }
+                Ok(())
+            }
+            // LOAD_U8
+            0x06 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u8>() })?;
+                let value = self.memory.read_checked::<u8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u8>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(value)); }
+                Ok(())
+            }
+            // LOAD_U16
+            0x07 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u16>() })?;
+                let value = self.memory.read_checked::<u16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u16>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(value)); }
+                Ok(())
+            }
+            // LOAD_U32
+            0x08 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u32>() })?;
+                let value = self.memory.read_checked::<u32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u32>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(value)); }
+                Ok(())
+            }
+            // LOAD_U64
+            0x09 => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u64>() })?;
+                let value = self.memory.read_checked::<u64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u64>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(value)); }
+                Ok(())
+            }
+            // LOAD_F32
+            0x0A => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f32>() })?;
+                let value = self.memory.read_checked::<f32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f32>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(value)); }
+                Ok(())
+            }
+            // LOAD_F64
+            0x0B => {
+                let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f64>() })?;
+                let value = self.memory.read_checked::<f64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f64>() })?;
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(value)); }
+                Ok(())
+            }
+            // STORE_I8
+            0x0C => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i8>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i8 };
+                if !self.memory.write_checked::<i8>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i8>() });
+                }
+                Ok(())
+            }
+            // STORE_I16
+            0x0D => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i16>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i16 };
+                if !self.memory.write_checked::<i16>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i16>() });
+                }
+                Ok(())
+            }
+            // STORE_I32
+            0x0E => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i32>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i32 };
+                if !self.memory.write_checked::<i32>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i32>() });
+                }
+                Ok(())
+            }
+            // STORE_I64
+            0x0F => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i64>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i64 };
+                if !self.memory.write_checked::<i64>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i64>() });
+                }
+                Ok(())
+            }
+            // STORE_U8
+            0x10 => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u8>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u8 };
+                if !self.memory.write_checked::<u8>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u8>() });
+                }
+                Ok(())
+            }
+            // STORE_U16
+            0x11 => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u16>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u16 };
+                if !self.memory.write_checked::<u16>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u16>() });
+                }
+                Ok(())
+            }
+            // STORE_U32
+            0x12 => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u32>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u32 };
+                if !self.memory.write_checked::<u32>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u32>() });
+                }
+                Ok(())
+            }
+            // STORE_U64
+            0x13 => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u64>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u64 };
+                if !self.memory.write_checked::<u64>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u64>() });
+                }
+                Ok(())
+            }
+            // STORE_F32
+            0x14 => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f32>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f32 };
+                if !self.memory.write_checked::<f32>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f32>() });
+                }
+                Ok(())
+            }
+            // STORE_F64
+            0x15 => {
+                let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
+                let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f64>() })?;
+                let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f64 };
+                if !self.memory.write_checked::<f64>(addr, value) {
+                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f64>() });
+                }
+                Ok(())
+            }
+            // ADD_I8
+            0x20 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // ADD_I16
+            0x21 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // ADD_I32
+            0x22 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // ADD_I64
+            0x23 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // SUB_I8
+            0x24 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // SUB_I16
+            0x25 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // SUB_I32
+            0x26 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // SUB_I64
+            0x27 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // MUL_I8
+            0x28 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // MUL_I16
+            0x29 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // MUL_I32
+            0x2A => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // MUL_I64
+            0x2B => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // DIV_I8
+            0x2C => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // DIV_I16
+            0x2D => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // DIV_I32
+            0x2E => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // DIV_I64
+            0x2F => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // MOD_I8
+            0x30 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // MOD_I16
+            0x31 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // MOD_I32
+            0x32 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // MOD_I64
+            0x33 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // NEG_I8
+            0x34 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_neg())); }
+                Ok(())
+            }
+            // NEG_I16
+            0x35 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_neg())); }
+                Ok(())
+            }
+            // NEG_I32
+            0x36 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_neg())); }
+                Ok(())
+            }
+            // NEG_I64
+            0x37 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_neg())); }
+                Ok(())
+            }
+            // ADD_U8
+            0x40 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // ADD_U16
+            0x41 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // ADD_U32
+            0x42 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // ADD_U64
+            0x43 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_add(vc))); }
+                Ok(())
+            }
+            // SUB_U8
+            0x44 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // SUB_U16
+            0x45 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // SUB_U32
+            0x46 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // SUB_U64
+            0x47 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_sub(vc))); }
+                Ok(())
+            }
+            // MUL_U8
+            0x48 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // MUL_U16
+            0x49 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // MUL_U32
+            0x4A => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // MUL_U64
+            0x4B => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_mul(vc))); }
+                Ok(())
+            }
+            // DIV_U8
+            0x4C => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // DIV_U16
+            0x4D => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // DIV_U32
+            0x4E => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // DIV_U64
+            0x4F => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_div(vc))); }
+                Ok(())
+            }
+            // MOD_U8
+            0x50 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // MOD_U16
+            0x51 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // MOD_U32
+            0x52 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // MOD_U64
+            0x53 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                if vc == 0 { return Err(VMError::DivisionByZero); }
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_rem(vc))); }
+                Ok(())
+            }
+            // ADD_F32
+            0x58 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb + vc)); }
+                Ok(())
+            }
+            // ADD_F64
+            0x59 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb + vc)); }
+                Ok(())
+            }
+            // SUB_F32
+            0x5A => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb - vc)); }
+                Ok(())
+            }
+            // SUB_F64
+            0x5B => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb - vc)); }
+                Ok(())
+            }
+            // MUL_F32
+            0x5C => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb * vc)); }
+                Ok(())
+            }
+            // MUL_F64
+            0x5D => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb * vc)); }
+                Ok(())
+            }
+            // DIV_F32
+            0x5E => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(vb / vc)); }
+                Ok(())
+            }
+            // DIV_F64
+            0x5F => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(vb / vc)); }
+                Ok(())
+            }
+            // NEG_F32
+            0x60 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(-vb)); }
+                Ok(())
+            }
+            // NEG_F64
+            0x61 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(-vb)); }
+                Ok(())
+            }
+            // AND_I8
+            0x68 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb & vc)); }
+                Ok(())
+            }
+            // AND_I16
+            0x69 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb & vc)); }
+                Ok(())
+            }
+            // AND_I32
+            0x6A => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb & vc)); }
+                Ok(())
+            }
+            // AND_I64
+            0x6B => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb & vc)); }
+                Ok(())
+            }
+            // OR_I8
+            0x6C => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb | vc)); }
+                Ok(())
+            }
+            // OR_I16
+            0x6D => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb | vc)); }
+                Ok(())
+            }
+            // OR_I32
+            0x6E => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb | vc)); }
+                Ok(())
+            }
+            // OR_I64
+            0x6F => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb | vc)); }
+                Ok(())
+            }
+            // XOR_I8
+            0x70 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb ^ vc)); }
+                Ok(())
+            }
+            // XOR_I16
+            0x71 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb ^ vc)); }
+                Ok(())
+            }
+            // XOR_I32
+            0x72 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb ^ vc)); }
+                Ok(())
+            }
+            // XOR_I64
+            0x73 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb ^ vc)); }
+                Ok(())
+            }
+            // NOT_I8
+            0x74 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(!vb)); }
+                Ok(())
+            }
+            // NOT_I16
+            0x75 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(!vb)); }
+                Ok(())
+            }
+            // NOT_I32
+            0x76 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(!vb)); }
+                Ok(())
+            }
+            // NOT_I64
+            0x77 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(!vb)); }
+                Ok(())
+            }
+            // SHL_I8
+            0x78 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_shl(vc as u32))); }
+                Ok(())
+            }
+            // SHL_I16
+            0x79 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_shl(vc as u32))); }
+                Ok(())
+            }
+            // SHL_I32
+            0x7A => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_shl(vc as u32))); }
+                Ok(())
+            }
+            // SHL_I64
+            0x7B => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_shl(vc as u32))); }
+                Ok(())
+            }
+            // SHR_I8
+            0x7C => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // SHR_I16
+            0x7D => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // SHR_I32
+            0x7E => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // SHR_I64
+            0x7F => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // SHR_U8
+            0x80 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // SHR_U16
+            0x81 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // SHR_U32
+            0x82 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // SHR_U64
+            0x83 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(vb.wrapping_shr(vc as u32))); }
+                Ok(())
+            }
+            // EQ_I8
+            0x90 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                Ok(())
+            }
+            // EQ_I16
+            0x91 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                Ok(())
+            }
+            // EQ_I32
+            0x92 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                Ok(())
+            }
+            // EQ_I64
+            0x93 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                Ok(())
+            }
+            // NE_I8
+            0x94 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                Ok(())
+            }
+            // NE_I16
+            0x95 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                Ok(())
+            }
+            // NE_I32
+            0x96 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                Ok(())
+            }
+            // NE_I64
+            0x97 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                Ok(())
+            }
+            // LT_I8
+            0x98 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LT_I16
+            0x99 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LT_I32
+            0x9A => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LT_I64
+            0x9B => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LE_I8
+            0x9C => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // LE_I16
+            0x9D => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // LE_I32
+            0x9E => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // LE_I64
+            0x9F => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // GT_I8
+            0xA0 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GT_I16
+            0xA1 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GT_I32
+            0xA2 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GT_I64
+            0xA3 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GE_I8
+            0xA4 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // GE_I16
+            0xA5 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // GE_I32
+            0xA6 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // GE_I64
+            0xA7 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // LT_U8
+            0xA8 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LT_U16
+            0xA9 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LT_U32
+            0xAA => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LT_U64
+            0xAB => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LE_U8
+            0xAC => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // LE_U16
+            0xAD => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // LE_U32
+            0xAE => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // LE_U64
+            0xAF => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // GT_U8
+            0xB0 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GT_U16
+            0xB1 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GT_U32
+            0xB2 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GT_U64
+            0xB3 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GE_U8
+            0xB4 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u8 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u8 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // GE_U16
+            0xB5 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u16 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u16 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // GE_U32
+            0xB6 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // GE_U64
+            0xB7 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().u64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().u64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // EQ_F32
+            0xB8 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                Ok(())
+            }
+            // EQ_F64
+            0xB9 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb == vc)); }
+                Ok(())
+            }
+            // NE_F32
+            0xBA => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                Ok(())
+            }
+            // NE_F64
+            0xBB => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb != vc)); }
+                Ok(())
+            }
+            // LT_F32
+            0xBC => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LT_F64
+            0xBD => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb < vc)); }
+                Ok(())
+            }
+            // LE_F32
+            0xBE => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // LE_F64
+            0xBF => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb <= vc)); }
+                Ok(())
+            }
+            // GT_F32
+            0xC0 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GT_F64
+            0xC1 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb > vc)); }
+                Ok(())
+            }
+            // GE_F32
+            0xC2 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f32 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f32 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // GE_F64
+            0xC3 => {
+                let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
+                let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(vb >= vc)); }
+                Ok(())
+            }
+            // CONV
+            0xC8 => {
+                let from_type = instr.c >> 4;
+                let to_type = instr.c & 0x0F;
+                let from = ValueType::from_byte(from_type)
+                    .ok_or(VMError::InvalidConversionType(from_type))?;
+                let to = ValueType::from_byte(to_type)
+                    .ok_or(VMError::InvalidConversionType(to_type))?;
+                let result = convert_register(
+                    unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked() },
+                    from,
+                    to,
+                );
+                unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(result); }
+                Ok(())
+            }
+            // JMP
+            0xD0 => {
+                let offset = if extended_bits != 0 { effective_offset as i16 } else { instr.sbx_ab() };
+                self.stack.jump(offset - 1);
+                Ok(())
+            }
+            // JMPIF
+            0xD1 => {
+                let offset = if extended_bits != 0 { effective_offset as i16 } else { instr.sbx() };
+                if unsafe { (*regs_ptr.add(instr.a as usize)).as_scalar().unwrap_unchecked().u64 } != 0 {
+                    self.stack.jump(offset - 1);
+                }
+                Ok(())
+            }
+            // JMPIFNOT
+            0xD2 => {
+                let offset = if extended_bits != 0 { effective_offset as i16 } else { instr.sbx() };
+                if unsafe { (*regs_ptr.add(instr.a as usize)).as_scalar().unwrap_unchecked().u64 } == 0 {
+                    self.stack.jump(offset - 1);
+                }
+                Ok(())
+            }
+            // TRY
+            0xD3 => {
+                let offset = instr.bx() as i16 as isize;
+                let handler_pc = error_pc.wrapping_add(offset as usize);
+                unsafe { self.stack.current_mut_unchecked().push_handler(handler_pc as u32); }
+                Ok(())
+            }
+            // ENDTRY
+            0xD4 => {
+                unsafe { self.stack.current_mut_unchecked().pop_handler(); }
+                Ok(())
+            }
+            // THROW
+            0xD5 => {
+                let value = unsafe { (*regs_ptr.add(instr.a as usize)).clone() };
+                loop {
+                    if let Some(handler_pc) = unsafe {
+                        self.stack.current_unchecked().current_handler()
+                    } {
+                        unsafe {
+                            self.stack.current_mut_unchecked().pc = handler_pc as usize;
+                            let rp = self.stack.current_unchecked().registers.as_ptr() as *mut VmValue;
+                            *rp = value;
+                            self.stack.current_mut_unchecked().pop_handler();
+                        }
+                        return Ok(());
+                    }
+                    self.stack.pop_frame();
+                    if self.stack.is_empty() {
+                        return Err(VMError::Runtime {
+                            message: "uncaught exception".to_string(),
+                            backtrace: vec![],
+                        });
+                    }
+                }
+            }
+            // GETUPVAL
+            0xD6 => {
+                let dest = instr.a as usize;
+                let idx = instr.b as usize;
+                let closure_reg = instr.c as usize;
+                let value = match unsafe { &*regs_ptr.add(closure_reg) } {
+                    VmValue::Closure { upvalues, .. } => {
+                        let upvalues = unsafe { &*upvalues.get() };
+                        upvalues.get(idx).cloned()
+                    }
+                    _ => return Err(VMError::ExpectedFunction(instr.c)),
+                }
+                .ok_or(VMError::InvalidRegister(idx as u8))?;
+                unsafe { *regs_ptr.add(dest) = value; }
+                Ok(())
+            }
+            // CLOSURE
+            0xD7 => {
+                let upvalue_count = instr.c as usize;
+                let callable_idx = if extended_bits != 0 {
+                    (instr.b as u32 | (extended_bits >> 16)) as usize
+                } else {
+                    instr.b as usize
+                };
+                let module = self.module()?;
+                let closure = match module
+                    .callables
+                    .get(callable_idx)
+                    .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
+                {
+                    Callable::Function(function_id) => {
+                        let function = module
+                            .functions
+                            .get(*function_id as usize)
+                            .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
+                        let mut upvalues = Vec::with_capacity(upvalue_count);
+                        let reg_count = max_regs as usize;
+                        let frame = unsafe { self.stack.current_unchecked() };
+                        for i in 0..upvalue_count {
+                            let reg_idx = reg_count - upvalue_count + i;
+                            upvalues.push(
+                                unsafe { frame.get_unchecked(reg_idx as u8) }.clone(),
+                            );
+                        }
+                        VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
+                    }
+                    Callable::Import(import_idx) => {
+                        let import_decl = module
+                            .imports
+                            .get(*import_idx as usize)
+                            .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
+                        let resolved = self
+                            .linker
+                            .resolve(import_decl)
+                            .ok_or_else(|| {
+                                VMError::UnresolvedNativeImport(import_decl.to_string())
+                            })?;
+                        VmValue::native_import(resolved)
+                    }
+                };
+                unsafe { *regs_ptr.add(instr.a as usize) = closure; }
+                Ok(())
+            }
+            // CALL
+            0xD8 => { self.call(instr.a, instr.b, instr.c)?; Ok(()) }
+            // RET
+            0xD9 => { self.ret(instr.a, instr.b)?; Ok(()) }
+            // SETUPVAL
+            0xDA => {
+                let src = instr.a as usize;
+                let idx = instr.b as usize;
+                let closure_reg = instr.c as usize;
+                let value = unsafe { (*regs_ptr.add(src)).clone() };
+                let slot = unsafe { self.stack.current_mut_unchecked().get_mut_unchecked(instr.c) };
+                match slot {
+                    VmValue::Closure { upvalues, .. } => {
+                        let upvalues = unsafe { &mut *upvalues.get() };
+                        if idx >= upvalues.len() { return Err(VMError::InvalidRegister(idx as u8)); }
+                        upvalues[idx] = value;
+                    }
+                    _ => return Err(VMError::ExpectedFunction(instr.c)),
+                }
+                Ok(())
+            }
+            // CALLTAIL
+            0xDB => {
+                let base = instr.a;
+                let arg_count = instr.b;
+
+                let mut args = Vec::with_capacity(arg_count as usize);
+                for index in 0..arg_count {
+                    let src = base.checked_add(1).and_then(|v| v.checked_add(index)).ok_or(VMError::InvalidRegister(base))?;
+                    args.push(unsafe { (*regs_ptr.add(src as usize)).clone() });
+                }
+
+                let callable = unsafe { (*regs_ptr.add(base as usize)).clone() };
+
+                if let Some(function) = callable.as_function() {
+                    let frame_mut = unsafe { self.stack.current_mut_unchecked() };
+                    frame_mut.set_chunk(function);
+                    frame_mut.pc = 0;
+                    for (i, arg) in args.into_iter().enumerate() {
+                        unsafe { frame_mut.set_unchecked(i as u8, arg); }
+                    }
+                    unsafe { frame_mut.set_unchecked(arg_count, callable); }
+                } else if let Some(idx) = callable.as_native_import() {
+                    let returns = self.linker.call(idx, &args, &mut self.memory).map_err(|e| VMError::NativeError(e.message))?;
+                    for (i, val) in returns.into_iter().enumerate() {
+                        let tgt = base.checked_add(i as u8).ok_or(VMError::InvalidRegister(base))?;
+                        unsafe { *regs_ptr.add(tgt as usize) = val; }
+                    }
+                    return self.ret(base, 0);
+                } else if let Some(closure) = callable.as_closure() {
+                    let (chunk, _upvalues) = closure;
+                    let frame_mut = unsafe { self.stack.current_mut_unchecked() };
+                    frame_mut.set_chunk(chunk.clone());
+                    frame_mut.pc = 0;
+                    for (i, arg) in args.into_iter().enumerate() {
+                        unsafe { frame_mut.set_unchecked(i as u8, arg); }
+                    }
+                } else {
+                    return Err(VMError::ExpectedFunction(base));
+                }
+                Ok(())
+            }
+            // GETG
+            0xE0 => {
+                let value = self.globals.get(instr.bx() as usize).cloned().unwrap_or_default();
+                unsafe { *regs_ptr.add(instr.a as usize) = value; }
+                Ok(())
+            }
+            // SETG
+            0xE1 => {
+                const MAX_GLOBALS: usize = 256;
+                let gx = instr.bx() as usize;
+                if gx >= MAX_GLOBALS {
+                    return Err(VMError::NativeError("global index out of range".to_string()));
+                }
+                let value = unsafe { (*regs_ptr.add(instr.a as usize)).clone() };
+                if gx >= self.globals.len() {
+                    self.globals.resize(gx + 1, VmValue::default());
+                }
+                self.globals[gx] = value;
+                Ok(())
+            }
+            // NOP
+            0xFE => Ok(()),
+            // HALT
+            0xFF => Err(VMError::Halted),
+            _ => Err(VMError::NativeError(format!("unknown opcode {}", instr.opcode_byte))),
+        }
     }
 
     pub fn scalar(&self, register: u8) -> Result<Register, VMError> {
@@ -1249,7 +3267,10 @@ impl Vm {
     pub unsafe fn scalar_unchecked(&self, register: u8) -> Register {
         let frame = unsafe { self.stack.current_unchecked() };
         let val = unsafe { frame.get_unchecked(register) };
-        Register { bits: unsafe { val.scalar_bits_unchecked() } }
+        match val {
+            VmValue::Scalar(r) => *r,
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
     }
 
     pub fn value(&self, register: u8) -> Result<VmValue, VMError> {
@@ -1310,7 +3331,6 @@ impl Vm {
                 len: frame.code_len,
             });
         }
-        // SAFETY: bounds checked above
         Ok(unsafe { *frame.code_ptr.add(frame.pc) })
     }
 
@@ -1473,8 +3493,6 @@ mod tests {
         vm.step().unwrap();
         vm.step().unwrap();
 
-        // SAFETY: tests verify exact register values produced by the bytecode;
-        // reading i64/u64 fields is sound because LOADK writes the matching type
         unsafe {
             assert_eq!(vm.scalar(2).unwrap().i64, 30);
             assert_eq!(vm.scalar(3).unwrap().u64, 1);
@@ -1521,8 +3539,6 @@ mod tests {
             }
         }
 
-        // SAFETY: tests verify exact register values produced by the bytecode;
-        // reading i64 is sound because LOADK_I64 writes the i64 field
         unsafe {
             assert_eq!(vm.scalar(0).unwrap().i64, 30);
         }
@@ -1560,8 +3576,6 @@ mod tests {
         vm.stack.push_entry(Rc::new(entry), "test");
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
-        // SAFETY: tests verify exact register values produced by the bytecode;
-        // reading i64 is sound because LOADK writes the i64 field
         unsafe {
             assert_eq!(vm.scalar(0).unwrap().i64, 1);
             assert_eq!(vm.scalar(1).unwrap().i64, 2);
@@ -1609,8 +3623,6 @@ mod tests {
         vm.stack.push_entry(Rc::new(entry), "test");
         while !matches!(vm.step(), Err(VMError::Halted)) {}
 
-        // SAFETY: tests verify exact register values produced by the bytecode;
-        // reading i64 is sound because LOADK writes the i64 field
         unsafe {
             assert_eq!(vm.scalar(0).unwrap().i64, 7);
         }
@@ -1693,7 +3705,7 @@ mod tests {
         let mut chunk = Chunk::new();
         chunk.max_registers = 2;
         chunk.emit(Instruction::abx(Opcode::LOADK, 0, 0));
-        chunk.emit(Instruction::abx(Opcode::TRY, 0, 4));  // handler at PC 5, TRY at PC 1, offset = 4
+        chunk.emit(Instruction::abx(Opcode::TRY, 0, 4));
         chunk.emit(Instruction::abc(Opcode::THROW, 0, 0, 0));
         chunk.emit(Instruction::abc(Opcode::HALT, 0, 0, 0));
         chunk.emit(Instruction::abc(Opcode::NOP, 0, 0, 0));
@@ -1708,15 +3720,14 @@ mod tests {
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
         vm.stack.push_entry(Rc::new(entry), "test");
 
-        vm.step().unwrap(); // LOADK r0, 42
-        vm.step().unwrap(); // TRY 5
-        vm.step().unwrap(); // THROW r0 — catches and jumps to handler at PC 5
-        // After THROW, register 0 should hold the thrown value
+        vm.step().unwrap();
+        vm.step().unwrap();
+        vm.step().unwrap();
         unsafe {
             assert_eq!(vm.scalar(0).unwrap().i64, 42);
         }
-        vm.step().unwrap(); // ENDTRY
-        assert_eq!(vm.step(), Err(VMError::Halted)); // HALT
+        vm.step().unwrap();
+        assert_eq!(vm.step(), Err(VMError::Halted));
     }
 
     #[test]
@@ -1813,8 +3824,8 @@ mod tests {
         vm.module = Some(Rc::new(module));
         let entry = vm.module.as_ref().unwrap().functions[0].chunk.clone();
         vm.stack.push_entry(Rc::new(entry), "outer");
-        vm.step().unwrap(); // CLOSURE
-        vm.step().unwrap(); // CALLTAIL
+        vm.step().unwrap();
+        vm.step().unwrap();
         assert_eq!(vm.stack.current().unwrap().pc, 0);
     }
 
