@@ -194,7 +194,6 @@ impl Vm {
                 return Ok(());
             }
             let instr = unsafe { *code_ptr.add(frame_pc) };
-            let max_regs = frame.chunk.max_registers;
 
             let (opcode_byte, extended_bits) = if instr.opcode_byte == Opcode::EXT as u8 {
                 unsafe { self.stack.current_mut_unchecked() }.pc += 1;
@@ -216,47 +215,36 @@ impl Vm {
                         let constant = self.module.as_ref().unwrap()
                             .constants
                             .get(bx)
-                            .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
-                            .clone();
+                            .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
+                        let bits = match constant {
+                            Constant::Bytes(_) => {
+                                let offset = self.constant_section.get(&bx).copied()
+                                    .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
+                                unsafe { Register::from_ptr(offset).bits }
+                            }
+                            _ => constant.to_bits().expect("non-bytes constants always have scalar bits"),
+                        };
                         unsafe {
                             let frame = self.stack.current_mut_unchecked();
-                            match constant {
-                                Constant::Bytes(_) => {
-                                    let offset = self.constant_section.get(&bx)
-                                        .copied()
-                                        .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-                                    let val = VmValue::scalar(Register::from_ptr(offset));
-                                    *scalar_ptr.add(instr.a as usize) = val.as_scalar().unwrap_unchecked().bits;
-                                    if !frame.set(instr.a, val) {
-                                        return Err(VMError::InvalidRegister(instr.a));
-                                    }
-                                }
-                                constant => {
-                                    let bits = constant.to_bits().expect("non-bytes constants always have scalar bits");
-                                    *scalar_ptr.add(instr.a as usize) = bits;
-                                    if !frame.set(instr.a, VmValue::scalar(Register { bits })) {
-                                        return Err(VMError::InvalidRegister(instr.a));
-                                    }
-                                }
+                            *scalar_ptr.add(instr.a as usize) = bits;
+                            if !frame.set(instr.a, VmValue::scalar(Register { bits })) {
+                                return Err(VMError::InvalidRegister(instr.a));
                             }
                         }
                         continue 'execute;
                     }
                     0x01 => {
-                        let src = unsafe { &*regs_ptr.add(instr.b as usize) };
-                        let val: Register = match src {
-                            VmValue::Scalar(r) => *r,
-                            _ => {
-                                let cloned = src.clone();
-                                let frame = unsafe { self.stack.current_mut_unchecked() };
-                                if !frame.set(instr.a, cloned) { return Err(VMError::InvalidRegister(instr.a)); }
-                                continue 'execute;
+                        let scalar_val = unsafe { *scalar_ptr.add(instr.b as usize) };
+                        let src_ref = unsafe { &*regs_ptr.add(instr.b as usize) };
+                        if let VmValue::Scalar(_) = src_ref {
+                            unsafe {
+                                *scalar_ptr.add(instr.a as usize) = scalar_val;
+                                *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register { bits: scalar_val });
                             }
-                        };
-                        let bits = unsafe { val.bits };
-                        unsafe {
-                            *scalar_ptr.add(instr.a as usize) = bits;
-                            *regs_ptr.add(instr.a as usize) = VmValue::scalar(val);
+                        } else {
+                            let cloned = src_ref.clone();
+                            let frame = unsafe { self.stack.current_mut_unchecked() };
+                            if !frame.set(instr.a, cloned) { return Err(VMError::InvalidRegister(instr.a)); }
                         }
                         continue 'execute;
                     }
@@ -1099,7 +1087,7 @@ impl Vm {
                                     .get(*function_id as usize)
                                     .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
                                 let mut upvalues = Vec::with_capacity(upvalue_count);
-                                let reg_count = max_regs as usize;
+                                let reg_count = unsafe { self.stack.current_unchecked().chunk.max_registers } as usize;
                                 let frame = unsafe { self.stack.current_unchecked() };
                                 for i in 0..upvalue_count {
                                     let reg_idx = reg_count - upvalue_count + i;
