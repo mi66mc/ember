@@ -185,13 +185,17 @@ impl Vm {
 
         // Inline match dispatch loop
         'execute: loop {
-            let frame_pc = unsafe { self.stack.current_unchecked().pc };
-            let code_len = unsafe { self.stack.current_unchecked().code_len };
+            // Re-acquire frame fields each iteration (frame may change due to CALL/RET)
+            let frame = unsafe { self.stack.current_unchecked() };
+            let code_ptr = frame.code_ptr;
+            let code_len = frame.code_len;
+            let regs_ptr = frame.registers.as_ptr() as *mut VmValue;
+            let frame_pc = frame.pc;
             if frame_pc >= code_len {
                 return Ok(());
             }
-            let instr = unsafe { *self.stack.current_unchecked().code_ptr.add(frame_pc) };
-            let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
+            let instr = unsafe { *code_ptr.add(frame_pc) };
+            let max_regs = frame.chunk.max_registers;
 
             // Handle EXT prefix
             let (opcode_byte, extended_bits, error_pc) = if instr.opcode_byte == Opcode::EXT as u8 {
@@ -200,7 +204,7 @@ impl Vm {
                 if next_pc >= code_len {
                     return Err(VMError::InvalidProgramCounter { pc: next_pc, len: code_len });
                 }
-                let next = unsafe { self.stack.current_unchecked().code_ptr.add(next_pc).read() };
+                let next = unsafe { code_ptr.add(next_pc).read() };
                 let extra = ((instr.c as u16) << 8) | instr.b as u16;
                 (next.opcode_byte, (extra as u32) << 16, next_pc)
             } else {
@@ -210,10 +214,6 @@ impl Vm {
 
             let effective_bx = instr.bx() as u32 | extended_bits;
             let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
-
-            let regs_ptr = unsafe {
-                self.stack.current_unchecked().registers.as_ptr() as *mut VmValue
-            };
 
             match opcode_byte {
                     // LOADK
