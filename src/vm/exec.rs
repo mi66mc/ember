@@ -196,7 +196,7 @@ impl Vm {
             let instr = unsafe { *code_ptr.add(frame_pc) };
             let max_regs = frame.chunk.max_registers;
 
-            let (opcode_byte, extended_bits, error_pc) = if instr.opcode_byte == Opcode::EXT as u8 {
+            let (opcode_byte, extended_bits) = if instr.opcode_byte == Opcode::EXT as u8 {
                 unsafe { self.stack.current_mut_unchecked() }.pc += 1;
                 let next_pc = frame_pc + 1;
                 if next_pc >= code_len {
@@ -204,18 +204,15 @@ impl Vm {
                 }
                 let next = unsafe { code_ptr.add(next_pc).read() };
                 let extra = ((instr.c as u16) << 8) | instr.b as u16;
-                (next.opcode_byte, (extra as u32) << 16, next_pc)
+                (next.opcode_byte, (extra as u32) << 16)
             } else {
-                (instr.opcode_byte, 0, frame_pc)
+                (instr.opcode_byte, 0)
             };
             unsafe { self.stack.current_mut_unchecked() }.pc += 1;
 
-            let effective_bx = instr.bx() as u32 | extended_bits;
-            let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
-
             match opcode_byte {
                     0x00 => {
-                        let bx = if extended_bits != 0 { effective_bx as usize } else { instr.bx() as usize };
+                        let bx = if extended_bits != 0 { (instr.bx() as u32 | extended_bits) as usize } else { instr.bx() as usize };
                         let constant = self.module.as_ref().unwrap()
                             .constants
                             .get(bx)
@@ -268,10 +265,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i8>(),
+                            pc: frame_pc, addr: base, size: size_of::<i8>(),
                         })?;
                         let value = self.memory.read_checked::<i8>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<i8>(),
+                            pc: frame_pc, addr, size: size_of::<i8>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(value)); }
                         continue 'execute;
@@ -281,10 +278,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i16>(),
+                            pc: frame_pc, addr: base, size: size_of::<i16>(),
                         })?;
                         let value = self.memory.read_checked::<i16>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<i16>(),
+                            pc: frame_pc, addr, size: size_of::<i16>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(value)); }
                         continue 'execute;
@@ -294,10 +291,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i32>(),
+                            pc: frame_pc, addr: base, size: size_of::<i32>(),
                         })?;
                         let value = self.memory.read_checked::<i32>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<i32>(),
+                            pc: frame_pc, addr, size: size_of::<i32>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(value)); }
                         continue 'execute;
@@ -307,10 +304,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i64>(),
+                            pc: frame_pc, addr: base, size: size_of::<i64>(),
                         })?;
                         let value = self.memory.read_checked::<i64>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<i64>(),
+                            pc: frame_pc, addr, size: size_of::<i64>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(value)); }
                         continue 'execute;
@@ -320,10 +317,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u8>(),
+                            pc: frame_pc, addr: base, size: size_of::<u8>(),
                         })?;
                         let value = self.memory.read_checked::<u8>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<u8>(),
+                            pc: frame_pc, addr, size: size_of::<u8>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(value)); }
                         continue 'execute;
@@ -333,10 +330,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u16>(),
+                            pc: frame_pc, addr: base, size: size_of::<u16>(),
                         })?;
                         let value = self.memory.read_checked::<u16>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<u16>(),
+                            pc: frame_pc, addr, size: size_of::<u16>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(value)); }
                         continue 'execute;
@@ -346,10 +343,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u32>(),
+                            pc: frame_pc, addr: base, size: size_of::<u32>(),
                         })?;
                         let value = self.memory.read_checked::<u32>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<u32>(),
+                            pc: frame_pc, addr, size: size_of::<u32>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(value)); }
                         continue 'execute;
@@ -359,10 +356,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u64>(),
+                            pc: frame_pc, addr: base, size: size_of::<u64>(),
                         })?;
                         let value = self.memory.read_checked::<u64>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<u64>(),
+                            pc: frame_pc, addr, size: size_of::<u64>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(value)); }
                         continue 'execute;
@@ -372,10 +369,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<f32>(),
+                            pc: frame_pc, addr: base, size: size_of::<f32>(),
                         })?;
                         let value = self.memory.read_checked::<f32>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<f32>(),
+                            pc: frame_pc, addr, size: size_of::<f32>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(value)); }
                         continue 'execute;
@@ -385,10 +382,10 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<f64>(),
+                            pc: frame_pc, addr: base, size: size_of::<f64>(),
                         })?;
                         let value = self.memory.read_checked::<f64>(addr).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr, size: size_of::<f64>(),
+                            pc: frame_pc, addr, size: size_of::<f64>(),
                         })?;
                         unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(value)); }
                         continue 'execute;
@@ -399,12 +396,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i8>(),
+                            pc: frame_pc, addr: base, size: size_of::<i8>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i8 };
                         if !self.memory.write_checked::<i8>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<i8>(),
+                                pc: frame_pc, addr, size: size_of::<i8>(),
                             });
                         }
                         continue 'execute;
@@ -415,12 +412,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i16>(),
+                            pc: frame_pc, addr: base, size: size_of::<i16>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i16 };
                         if !self.memory.write_checked::<i16>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<i16>(),
+                                pc: frame_pc, addr, size: size_of::<i16>(),
                             });
                         }
                         continue 'execute;
@@ -431,12 +428,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i32>(),
+                            pc: frame_pc, addr: base, size: size_of::<i32>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i32 };
                         if !self.memory.write_checked::<i32>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<i32>(),
+                                pc: frame_pc, addr, size: size_of::<i32>(),
                             });
                         }
                         continue 'execute;
@@ -447,12 +444,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<i64>(),
+                            pc: frame_pc, addr: base, size: size_of::<i64>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i64 };
                         if !self.memory.write_checked::<i64>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<i64>(),
+                                pc: frame_pc, addr, size: size_of::<i64>(),
                             });
                         }
                         continue 'execute;
@@ -463,12 +460,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u8>(),
+                            pc: frame_pc, addr: base, size: size_of::<u8>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u8 };
                         if !self.memory.write_checked::<u8>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<u8>(),
+                                pc: frame_pc, addr, size: size_of::<u8>(),
                             });
                         }
                         continue 'execute;
@@ -479,12 +476,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u16>(),
+                            pc: frame_pc, addr: base, size: size_of::<u16>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u16 };
                         if !self.memory.write_checked::<u16>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<u16>(),
+                                pc: frame_pc, addr, size: size_of::<u16>(),
                             });
                         }
                         continue 'execute;
@@ -495,12 +492,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u32>(),
+                            pc: frame_pc, addr: base, size: size_of::<u32>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u32 };
                         if !self.memory.write_checked::<u32>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<u32>(),
+                                pc: frame_pc, addr, size: size_of::<u32>(),
                             });
                         }
                         continue 'execute;
@@ -511,12 +508,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<u64>(),
+                            pc: frame_pc, addr: base, size: size_of::<u64>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u64 };
                         if !self.memory.write_checked::<u64>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<u64>(),
+                                pc: frame_pc, addr, size: size_of::<u64>(),
                             });
                         }
                         continue 'execute;
@@ -527,12 +524,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<f32>(),
+                            pc: frame_pc, addr: base, size: size_of::<f32>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f32 };
                         if !self.memory.write_checked::<f32>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<f32>(),
+                                pc: frame_pc, addr, size: size_of::<f32>(),
                             });
                         }
                         continue 'execute;
@@ -543,12 +540,12 @@ impl Vm {
                         let c = instr.c as usize;
                         let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
                         let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds {
-                            pc: error_pc, addr: base, size: size_of::<f64>(),
+                            pc: frame_pc, addr: base, size: size_of::<f64>(),
                         })?;
                         let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f64 };
                         if !self.memory.write_checked::<f64>(addr, value) {
                             return Err(VMError::MemoryOutOfBounds {
-                                pc: error_pc, addr, size: size_of::<f64>(),
+                                pc: frame_pc, addr, size: size_of::<f64>(),
                             });
                         }
                         continue 'execute;
@@ -795,7 +792,7 @@ impl Vm {
                     }
                     0xD0 => {
                         let offset = if extended_bits != 0 {
-                            effective_offset as i16
+                            (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16
                         } else {
                             instr.sbx_ab()
                         };
@@ -804,7 +801,7 @@ impl Vm {
                     }
                     0xD1 => {
                         let offset = if extended_bits != 0 {
-                            effective_offset as i16
+                            (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16
                         } else {
                             instr.sbx()
                         };
@@ -815,7 +812,7 @@ impl Vm {
                     }
                     0xD2 => {
                         let offset = if extended_bits != 0 {
-                            effective_offset as i16
+                            (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16
                         } else {
                             instr.sbx()
                         };
@@ -826,7 +823,7 @@ impl Vm {
                     }
                     0xD3 => {
                         let offset = instr.bx() as i16 as isize;
-                        let handler_pc = error_pc.wrapping_add(offset as usize);
+                        let handler_pc = frame_pc.wrapping_add(offset as usize);
                         unsafe { self.stack.current_mut_unchecked().push_handler(handler_pc as u32); }
                         continue 'execute;
                     }
@@ -1064,7 +1061,7 @@ impl Vm {
             instr
         };
 
-        let error_pc = unsafe { self.stack.current_unchecked().pc.wrapping_sub(1) };
+        let frame_pc = unsafe { self.stack.current_unchecked().pc.wrapping_sub(1) };
         let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
         let regs_ptr = unsafe { self.stack.current_unchecked().registers.as_ptr() as *mut VmValue };
         let effective_bx = instr.bx() as u32 | extended_bits;
@@ -1072,7 +1069,7 @@ impl Vm {
 
         match instr.opcode_byte {
             0x00 => {
-                let bx = if extended_bits != 0 { effective_bx as usize } else { instr.bx() as usize };
+                let bx = if extended_bits != 0 { (instr.bx() as u32 | extended_bits) as usize } else { instr.bx() as usize };
                 let constant = self.module()?
                     .constants
                     .get(bx)
@@ -1124,180 +1121,180 @@ impl Vm {
             0x02 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i8>() })?;
-                let value = self.memory.read_checked::<i8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i8>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i8>() })?;
+                let value = self.memory.read_checked::<i8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i8>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(value)); }
                 Ok(())
             }
             0x03 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i16>() })?;
-                let value = self.memory.read_checked::<i16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i16>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i16>() })?;
+                let value = self.memory.read_checked::<i16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i16>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(value)); }
                 Ok(())
             }
             0x04 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i32>() })?;
-                let value = self.memory.read_checked::<i32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i32>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i32>() })?;
+                let value = self.memory.read_checked::<i32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i32>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(value)); }
                 Ok(())
             }
             0x05 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i64>() })?;
-                let value = self.memory.read_checked::<i64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i64>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i64>() })?;
+                let value = self.memory.read_checked::<i64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i64>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(value)); }
                 Ok(())
             }
             0x06 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u8>() })?;
-                let value = self.memory.read_checked::<u8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u8>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u8>() })?;
+                let value = self.memory.read_checked::<u8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u8>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(value)); }
                 Ok(())
             }
             0x07 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u16>() })?;
-                let value = self.memory.read_checked::<u16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u16>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u16>() })?;
+                let value = self.memory.read_checked::<u16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u16>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(value)); }
                 Ok(())
             }
             0x08 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u32>() })?;
-                let value = self.memory.read_checked::<u32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u32>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u32>() })?;
+                let value = self.memory.read_checked::<u32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u32>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(value)); }
                 Ok(())
             }
             0x09 => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u64>() })?;
-                let value = self.memory.read_checked::<u64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u64>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u64>() })?;
+                let value = self.memory.read_checked::<u64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u64>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(value)); }
                 Ok(())
             }
             0x0A => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f32>() })?;
-                let value = self.memory.read_checked::<f32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f32>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<f32>() })?;
+                let value = self.memory.read_checked::<f32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<f32>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(value)); }
                 Ok(())
             }
             0x0B => {
                 let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(b)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f64>() })?;
-                let value = self.memory.read_checked::<f64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f64>() })?;
+                let addr = base.checked_add(c).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<f64>() })?;
+                let value = self.memory.read_checked::<f64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<f64>() })?;
                 unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(value)); }
                 Ok(())
             }
             0x0C => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i8>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i8>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i8 };
                 if !self.memory.write_checked::<i8>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i8>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i8>() });
                 }
                 Ok(())
             }
             0x0D => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i16>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i16>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i16 };
                 if !self.memory.write_checked::<i16>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i16>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i16>() });
                 }
                 Ok(())
             }
             0x0E => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i32>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i32>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i32 };
                 if !self.memory.write_checked::<i32>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i32>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i32>() });
                 }
                 Ok(())
             }
             0x0F => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<i64>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<i64>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().i64 };
                 if !self.memory.write_checked::<i64>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<i64>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i64>() });
                 }
                 Ok(())
             }
             0x10 => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u8>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u8>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u8 };
                 if !self.memory.write_checked::<u8>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u8>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u8>() });
                 }
                 Ok(())
             }
             0x11 => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u16>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u16>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u16 };
                 if !self.memory.write_checked::<u16>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u16>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u16>() });
                 }
                 Ok(())
             }
             0x12 => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u32>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u32>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u32 };
                 if !self.memory.write_checked::<u32>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u32>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u32>() });
                 }
                 Ok(())
             }
             0x13 => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<u64>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<u64>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().u64 };
                 if !self.memory.write_checked::<u64>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<u64>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u64>() });
                 }
                 Ok(())
             }
             0x14 => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f32>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<f32>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f32 };
                 if !self.memory.write_checked::<f32>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f32>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<f32>() });
                 }
                 Ok(())
             }
             0x15 => {
                 let a = instr.a as usize; let b = instr.b as usize; let c = instr.c as usize;
                 let base = unsafe { (*regs_ptr.add(a)).as_scalar().unwrap_unchecked().ptr };
-                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: error_pc, addr: base, size: size_of::<f64>() })?;
+                let addr = base.checked_add(b).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr: base, size: size_of::<f64>() })?;
                 let value = unsafe { (*regs_ptr.add(c)).as_scalar().unwrap_unchecked().f64 };
                 if !self.memory.write_checked::<f64>(addr, value) {
-                    return Err(VMError::MemoryOutOfBounds { pc: error_pc, addr, size: size_of::<f64>() });
+                    return Err(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<f64>() });
                 }
                 Ok(())
             }
@@ -1534,19 +1531,19 @@ impl Vm {
                 Ok(())
             }
             0xD0 => {
-                let offset = if extended_bits != 0 { effective_offset as i16 } else { instr.sbx_ab() };
+                let offset = if extended_bits != 0 { (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16 } else { instr.sbx_ab() };
                 self.stack.jump(offset - 1);
                 Ok(())
             }
             0xD1 => {
-                let offset = if extended_bits != 0 { effective_offset as i16 } else { instr.sbx() };
+                let offset = if extended_bits != 0 { (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16 } else { instr.sbx() };
                 if unsafe { (*regs_ptr.add(instr.a as usize)).as_scalar().unwrap_unchecked().u64 } != 0 {
                     self.stack.jump(offset - 1);
                 }
                 Ok(())
             }
             0xD2 => {
-                let offset = if extended_bits != 0 { effective_offset as i16 } else { instr.sbx() };
+                let offset = if extended_bits != 0 { (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16 } else { instr.sbx() };
                 if unsafe { (*regs_ptr.add(instr.a as usize)).as_scalar().unwrap_unchecked().u64 } == 0 {
                     self.stack.jump(offset - 1);
                 }
@@ -1554,7 +1551,7 @@ impl Vm {
             }
             0xD3 => {
                 let offset = instr.bx() as i16 as isize;
-                let handler_pc = error_pc.wrapping_add(offset as usize);
+                let handler_pc = frame_pc.wrapping_add(offset as usize);
                 unsafe { self.stack.current_mut_unchecked().push_handler(handler_pc as u32); }
                 Ok(())
             }
