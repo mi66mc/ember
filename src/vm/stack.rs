@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::bytecode::{Chunk, Instruction};
+use crate::vm::register::{Register, VmValue};
 use crate::vm::value::{self, ClosureData, TypeMask, Value};
 
 pub const MAX_REGISTERS: u8 = 64;
@@ -11,8 +12,15 @@ pub struct Frame {
     pub(crate) code_ptr: *const Instruction,
     pub(crate) code_len: usize,
     pub(crate) pc: usize,
-    pub(crate) registers: Box<[u64]>,     // raw u64 values
-    pub(crate) reg_types: TypeMask,        // 2 bits per register
+
+    // OLD SYSTEM (gradually being migrated away)
+    pub(crate) registers: Box<[VmValue]>,
+    pub(crate) scalar_regs: Box<[u64]>,
+
+    // NEW SYSTEM (side-band tagged)
+    pub(crate) raw_regs: Box<[u64]>,
+    pub(crate) reg_types: TypeMask,
+
     pub(crate) return_base: Option<u8>,
     pub(crate) expected_returns: u8,
     pub(crate) function_name: String,
@@ -20,11 +28,11 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn entry(chunk: Rc<Chunk>, registers: Box<[u64]>, name: impl Into<String>) -> Self {
+    pub fn entry(chunk: Rc<Chunk>, registers: Box<[VmValue]>, name: impl Into<String>) -> Self {
         Self::new(chunk, registers, None, 0, name)
     }
 
-    pub fn call(chunk: Rc<Chunk>, registers: Box<[u64]>, return_base: u8, expected_returns: u8, name: impl Into<String>) -> Self {
+    pub fn call(chunk: Rc<Chunk>, registers: Box<[VmValue]>, return_base: u8, expected_returns: u8, name: impl Into<String>) -> Self {
         Self::new(chunk, registers, Some(return_base), expected_returns, name)
     }
 
@@ -34,15 +42,18 @@ impl Frame {
         self.chunk = chunk;
     }
 
-    fn new(chunk: Rc<Chunk>, registers: Box<[u64]>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
+    fn new(chunk: Rc<Chunk>, registers: Box<[VmValue]>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
         let code_ptr = chunk.code.as_ptr();
         let code_len = chunk.code.len();
+        let reg_count = registers.len();
         Frame {
             chunk,
             code_ptr,
             code_len,
             pc: 0,
             registers,
+            scalar_regs: vec![0u64; reg_count].into_boxed_slice(),
+            raw_regs: vec![0u64; reg_count].into_boxed_slice(),
             reg_types: TypeMask::new(),
             return_base,
             expected_returns,
@@ -55,93 +66,116 @@ impl Frame {
     pub fn function_name(&self) -> &str { &self.function_name }
     pub fn chunk(&self) -> &Rc<Chunk> { &self.chunk }
 
-    #[inline(always)]
-    pub fn get(&self, idx: u8) -> Option<u64> {
-        self.registers.get(idx as usize).copied()
+    // ── Old system accessors (VmValue) ──
+
+    pub fn get(&self, idx: u8) -> Option<&VmValue> {
+        self.registers.get(idx as usize)
     }
 
     #[inline(always)]
-    pub unsafe fn get_unchecked(&self, idx: u8) -> u64 {
-        *self.registers.get_unchecked(idx as usize)
+    pub unsafe fn get_unchecked(&self, idx: u8) -> &VmValue {
+        unsafe { self.registers.get_unchecked(idx as usize) }
     }
 
-    #[inline(always)]
-    pub fn get_tag(&self, idx: u8) -> u8 {
-        self.reg_types.get(idx)
-    }
-
-    #[inline]
-    pub fn set(&mut self, idx: u8, value: u64, tag: u8) -> bool {
+    pub fn set(&mut self, idx: u8, value: VmValue) -> bool {
         if let Some(slot) = self.registers.get_mut(idx as usize) {
+            // Sync old scalar_regs
+            if let VmValue::Scalar(r) = &value {
+                if let Some(s) = self.scalar_regs.get_mut(idx as usize) {
+                    *s = unsafe { r.bits };
+                }
+                // Also sync new raw_regs
+                if let Some(s) = self.raw_regs.get_mut(idx as usize) {
+                    *s = unsafe { r.bits };
+                }
+            } else {
+                if let Some(s) = self.scalar_regs.get_mut(idx as usize) { *s = 0; }
+                if let Some(s) = self.raw_regs.get_mut(idx as usize) { *s = 0; }
+            }
             *slot = value;
-            self.reg_types.set(idx, tag);
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 
     #[inline(always)]
-    pub unsafe fn set_unchecked(&mut self, idx: u8, value: u64, tag: u8) {
-        *self.registers.get_unchecked_mut(idx as usize) = value;
-        self.reg_types.set(idx, tag);
+    pub unsafe fn set_unchecked(&mut self, idx: u8, value: VmValue) {
+        if let VmValue::Scalar(r) = &value {
+            unsafe { *self.scalar_regs.get_unchecked_mut(idx as usize) = r.bits; }
+            unsafe { *self.raw_regs.get_unchecked_mut(idx as usize) = r.bits; }
+        } else {
+            unsafe { *self.scalar_regs.get_unchecked_mut(idx as usize) = 0; }
+            unsafe { *self.raw_regs.get_unchecked_mut(idx as usize) = 0; }
+        }
+        unsafe { *self.registers.get_unchecked_mut(idx as usize) = value; }
     }
 
-    #[inline]
-    pub fn get_mut(&mut self, idx: u8) -> Option<&mut u64> {
+    pub fn get_mut(&mut self, idx: u8) -> Option<&mut VmValue> {
         self.registers.get_mut(idx as usize)
     }
 
     #[inline(always)]
-    pub unsafe fn get_mut_unchecked(&mut self, idx: u8) -> &mut u64 {
-        self.registers.get_unchecked_mut(idx as usize)
+    pub unsafe fn get_mut_unchecked(&mut self, idx: u8) -> &mut VmValue {
+        unsafe { self.registers.get_unchecked_mut(idx as usize) }
     }
 
     pub fn get_scalar(&self, idx: u8) -> Option<Register> {
-        if self.reg_types.get(idx) == value::tag::SCALAR {
-            Some(Register { bits: self.registers[idx as usize] })
-        } else {
-            None
-        }
+        self.registers.get(idx as usize).and_then(|v| v.as_scalar())
     }
+
+    // ── New system accessors (tagged u64) ──
+
+    #[inline]
+    pub fn raw_get(&self, idx: u8) -> u64 {
+        unsafe { *self.raw_regs.get_unchecked(idx as usize) }
+    }
+
+    #[inline]
+    pub fn raw_set(&mut self, idx: u8, value: u64, tag: u8) {
+        unsafe {
+            *self.raw_regs.get_unchecked_mut(idx as usize) = value;
+        }
+        self.reg_types.set(idx, tag);
+    }
+
+    #[inline]
+    pub fn raw_tag(&self, idx: u8) -> u8 {
+        self.reg_types.get(idx)
+    }
+
+    // ── Roots ──
 
     pub fn collect_roots(&self) -> Vec<usize> {
         let mut roots = Vec::new();
-        for i in 0..self.registers.len() {
-            let tag = self.reg_types.get(i as u8);
-            let raw = self.registers[i];
-            match tag {
-                value::tag::SCALAR => {
-                    if raw != 0 && raw != u64::MAX {
-                        roots.push(raw as usize);
+        for reg in self.registers.iter() {
+            if let VmValue::Scalar(r) = reg {
+                let ptr = unsafe { r.ptr };
+                if ptr != 0 { roots.push(ptr); }
+            }
+            if let VmValue::Closure(data) = reg {
+                let upvalues = unsafe { &*data.upvalues.get() };
+                for uv in upvalues.iter() {
+                    if let VmValue::Scalar(r) = uv {
+                        let ptr = unsafe { r.ptr };
+                        if ptr != 0 { roots.push(ptr); }
                     }
                 }
-                value::tag::CLOSURE => {
-                    let data = unsafe { &*(raw as *const ClosureData) };
-                    let upvalues = unsafe { &*data.upvalues.get() };
-                    for &uv in upvalues.iter() {
-                        if uv != 0 && uv != u64::MAX {
-                            roots.push(uv as usize);
-                        }
-                    }
-                }
-                _ => {}
             }
         }
         roots
     }
 
     pub fn register_count(&self) -> usize { self.registers.len() }
-    pub fn register_value(&self, idx: u8) -> Option<u64> { self.get(idx) }
+    pub fn register_value(&self, idx: u8) -> Option<&VmValue> { self.get(idx) }
     pub fn push_handler(&mut self, handler_pc: u32) { self.handlers.push(handler_pc); }
     pub fn pop_handler(&mut self) -> Option<u32> { self.handlers.pop() }
     pub fn current_handler(&self) -> Option<u32> { self.handlers.last().copied() }
 }
 
-// Re-export Register for backward compat
-use crate::vm::value::Register;
-
 pub struct CallStack {
     frames: Vec<Frame>,
-    register_pool: Vec<Box<[u64]>>,
+    register_pool: Vec<Box<[VmValue]>>,
 }
 
 impl CallStack {
@@ -191,13 +225,13 @@ impl CallStack {
         }
     }
 
-    fn acquire_registers(&mut self, count: usize) -> Box<[u64]> {
+    fn acquire_registers(&mut self, count: usize) -> Box<[VmValue]> {
         if let Some(pos) = self.register_pool.iter().position(|r| r.len() == count) {
             let mut regs = self.register_pool.swap_remove(pos);
-            for r in regs.iter_mut() { *r = 0; }
+            for r in regs.iter_mut() { *r = VmValue::zero(); }
             regs
         } else {
-            vec![0u64; count].into_boxed_slice()
+            vec![VmValue::zero(); count].into_boxed_slice()
         }
     }
 }

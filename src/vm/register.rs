@@ -13,21 +13,12 @@
 // The safe-usage contract is:
 //
 // 1. A `Register` can be safely read via any named field whose type matches
-//    the last write. The bytecode compiler guarantees this by emitting typed
-//    opcodes (e.g. ADD_I64 produces operands that were written by from_i64).
-//
-// 2. Every `from_*` constructor produces a valid bit pattern for its
-//    respective type, so reading the same field back is always sound.
-//
-// 3. Reading via `bits: u64` is always safe regardless of which field was
-//    last written, because the union is exactly 64 bits wide and `u64` is
-//    valid for every possible bit pattern.
-
 use std::cell::UnsafeCell;
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
 use crate::vm::native::ImportIndex;
+use crate::vm::value::ClosureData;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -47,54 +38,28 @@ pub union Register {
 }
 
 impl Register {
-    pub fn zero() -> Self {
-        Register { bits: 0 }
-    }
-
-    pub fn from_i8(v: i8) -> Self {
-        Register { i8: v }
-    }
-    pub fn from_i16(v: i16) -> Self {
-        Register { i16: v }
-    }
-    pub fn from_i32(v: i32) -> Self {
-        Register { i32: v }
-    }
-    pub fn from_i64(v: i64) -> Self {
-        Register { i64: v }
-    }
-
-    pub fn from_u8(v: u8) -> Self {
-        Register { u8: v }
-    }
-    pub fn from_u16(v: u16) -> Self {
-        Register { u16: v }
-    }
-    pub fn from_u32(v: u32) -> Self {
-        Register { u32: v }
-    }
-    pub fn from_u64(v: u64) -> Self {
-        Register { u64: v }
-    }
-
-    pub fn from_f32(v: f32) -> Self {
-        Register { f32: v }
-    }
-    pub fn from_f64(v: f64) -> Self {
-        Register { f64: v }
-    }
-
-    pub fn from_ptr(v: usize) -> Self {
-        Register { ptr: v }
-    }
-    pub fn from_bool(v: bool) -> Self {
-        Register { u64: v as u64 }
-    }
+    pub fn zero() -> Self { Register { bits: 0 } }
+    pub fn from_i8(v: i8) -> Self { Register { i8: v } }
+    pub fn from_i16(v: i16) -> Self { Register { i16: v } }
+    pub fn from_i32(v: i32) -> Self { Register { i32: v } }
+    pub fn from_i64(v: i64) -> Self { Register { i64: v } }
+    pub fn from_u8(v: u8) -> Self { Register { u8: v } }
+    pub fn from_u16(v: u16) -> Self { Register { u16: v } }
+    pub fn from_u32(v: u32) -> Self { Register { u32: v } }
+    pub fn from_u64(v: u64) -> Self { Register { u64: v } }
+    pub fn from_f32(v: f32) -> Self { Register { f32: v } }
+    pub fn from_f64(v: f64) -> Self { Register { f64: v } }
+    pub fn from_ptr(v: usize) -> Self { Register { ptr: v } }
+    pub fn from_bool(v: bool) -> Self { Register { u64: v as u64 } }
 }
 
 impl Default for Register {
-    fn default() -> Self {
-        Self::zero()
+    fn default() -> Self { Self::zero() }
+}
+
+impl std::fmt::Debug for Register {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Register(0x{:016x})", unsafe { self.bits })
     }
 }
 
@@ -106,17 +71,7 @@ impl PartialEq for Register {
 
 impl Eq for Register {}
 
-impl std::fmt::Debug for Register {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Register(0x{:016x})", unsafe { self.bits })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ClosureData {
-    pub chunk: Rc<Chunk>,
-    pub upvalues: Rc<UnsafeCell<Vec<VmValue>>>,
-}
+// ── VmValue ────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub enum VmValue {
