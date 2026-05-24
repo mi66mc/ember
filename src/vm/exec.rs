@@ -6,7 +6,7 @@ use crate::bytecode::{
 };
 use crate::vm::memory::Memory;
 use crate::vm::native::{NativeError, NativeLinker};
-use crate::vm::register::{Register, VmValue};
+use crate::vm::register::{ClosureData, Register, VmValue};
 use crate::vm::stack::{CallStack, Frame};
 
 fn convert_register(src: Register, from: ValueType, to: ValueType) -> Register {
@@ -212,7 +212,7 @@ impl Vm {
             let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
 
             let regs_ptr = unsafe {
-                self.stack.current_unchecked().registers.as_ptr() as *mut VmValue
+                self.stack.current_unchecked().object_regs.as_ptr() as *mut VmValue
             };
 
             match opcode_byte {
@@ -1593,7 +1593,7 @@ impl Vm {
                             } {
                                 unsafe {
                                     self.stack.current_mut_unchecked().pc = handler_pc as usize;
-                                    let rp = self.stack.current_unchecked().registers.as_ptr() as *mut VmValue;
+                                    let rp = self.stack.current_unchecked().object_regs.as_ptr() as *mut VmValue;
                                     *rp = value;
                                     self.stack.current_mut_unchecked().pop_handler();
                                 }
@@ -1614,8 +1614,8 @@ impl Vm {
                         let idx = instr.b as usize;
                         let closure_reg = instr.c as usize;
                         let value = match unsafe { &*regs_ptr.add(closure_reg) } {
-                            VmValue::Closure { upvalues, .. } => {
-                                let upvalues = unsafe { &*upvalues.get() };
+                            VmValue::Closure(data) => {
+                                let upvalues = unsafe { &*data.upvalues.get() };
                                 upvalues.get(idx).cloned()
                             }
                             _ => return Err(VMError::ExpectedFunction(instr.c)),
@@ -1690,8 +1690,8 @@ impl Vm {
                             self.stack.current_mut_unchecked().get_mut_unchecked(instr.c)
                         };
                         match slot {
-                            VmValue::Closure { upvalues, .. } => {
-                                let upvalues = unsafe { &mut *upvalues.get() };
+                            VmValue::Closure(data) => {
+                                let upvalues = unsafe { &mut *data.upvalues.get() };
                                 if idx >= upvalues.len() {
                                     return Err(VMError::InvalidRegister(idx as u8));
                                 }
@@ -1737,8 +1737,8 @@ impl Vm {
                                 unsafe { *regs_ptr.add(tgt as usize) = val; }
                             }
                             return self.ret(base, 0);
-                        } else if let Some(closure) = callable.as_closure() {
-                            let (chunk, _upvalues) = closure;
+                        } else if let Some(data) = callable.as_closure() {
+                            let chunk = &data.chunk;
                             let frame_mut = unsafe { self.stack.current_mut_unchecked() };
                             frame_mut.set_chunk(chunk.clone());
                             frame_mut.pc = 0;
@@ -1825,7 +1825,7 @@ impl Vm {
 
         let error_pc = unsafe { self.stack.current_unchecked().pc.wrapping_sub(1) };
         let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
-        let regs_ptr = unsafe { self.stack.current_unchecked().registers.as_ptr() as *mut VmValue };
+        let regs_ptr = unsafe { self.stack.current_unchecked().object_regs.as_ptr() as *mut VmValue };
         let effective_bx = instr.bx() as u32 | extended_bits;
         let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
 
@@ -3085,7 +3085,7 @@ impl Vm {
                     } {
                         unsafe {
                             self.stack.current_mut_unchecked().pc = handler_pc as usize;
-                            let rp = self.stack.current_unchecked().registers.as_ptr() as *mut VmValue;
+                            let rp = self.stack.current_unchecked().object_regs.as_ptr() as *mut VmValue;
                             *rp = value;
                             self.stack.current_mut_unchecked().pop_handler();
                         }
@@ -3106,8 +3106,8 @@ impl Vm {
                 let idx = instr.b as usize;
                 let closure_reg = instr.c as usize;
                 let value = match unsafe { &*regs_ptr.add(closure_reg) } {
-                    VmValue::Closure { upvalues, .. } => {
-                        let upvalues = unsafe { &*upvalues.get() };
+                    VmValue::Closure(data) => {
+                        let upvalues = unsafe { &*data.upvalues.get() };
                         upvalues.get(idx).cloned()
                     }
                     _ => return Err(VMError::ExpectedFunction(instr.c)),
@@ -3171,12 +3171,11 @@ impl Vm {
             0xDA => {
                 let src = instr.a as usize;
                 let idx = instr.b as usize;
-                let closure_reg = instr.c as usize;
                 let value = unsafe { (*regs_ptr.add(src)).clone() };
                 let slot = unsafe { self.stack.current_mut_unchecked().get_mut_unchecked(instr.c) };
                 match slot {
-                    VmValue::Closure { upvalues, .. } => {
-                        let upvalues = unsafe { &mut *upvalues.get() };
+                    VmValue::Closure(data) => {
+                        let upvalues = unsafe { &mut *data.upvalues.get() };
                         if idx >= upvalues.len() { return Err(VMError::InvalidRegister(idx as u8)); }
                         upvalues[idx] = value;
                     }
@@ -3212,8 +3211,8 @@ impl Vm {
                         unsafe { *regs_ptr.add(tgt as usize) = val; }
                     }
                     return self.ret(base, 0);
-                } else if let Some(closure) = callable.as_closure() {
-                    let (chunk, _upvalues) = closure;
+                } else if let Some(data) = callable.as_closure() {
+                    let chunk = &data.chunk;
                     let frame_mut = unsafe { self.stack.current_mut_unchecked() };
                     frame_mut.set_chunk(chunk.clone());
                     frame_mut.pc = 0;
@@ -3374,7 +3373,8 @@ impl Vm {
             return Ok(());
         }
 
-        if let Some((chunk, _)) = callable.as_closure() {
+        if let Some(data) = callable.as_closure() {
+            let chunk = &data.chunk;
             if arg_count as usize > chunk.max_registers as usize {
                 return Err(VMError::InvalidRegister(arg_count));
             }

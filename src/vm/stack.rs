@@ -10,7 +10,9 @@ pub struct Frame {
     pub(crate) code_ptr: *const Instruction,
     pub(crate) code_len: usize,
     pub(crate) pc: usize,
-    pub(crate) registers: Box<[VmValue]>,
+    pub(crate) scalar_regs: Box<[u64]>,
+    pub(crate) object_regs: Box<[VmValue]>,
+    pub(crate) has_objects: bool,
     pub(crate) return_base: Option<u8>,
     pub(crate) expected_returns: u8,
     pub(crate) function_name: String,
@@ -19,21 +21,22 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn entry(chunk: Rc<Chunk>, registers: Box<[VmValue]>, name: impl Into<String>) -> Self {
-        Self::new(chunk, registers, None, 0, name)
+    pub fn entry(chunk: Rc<Chunk>, scalar_regs: Box<[u64]>, object_regs: Box<[VmValue]>, has_objects: bool, name: impl Into<String>) -> Self {
+        Self::new(chunk, scalar_regs, object_regs, has_objects, None, 0, name)
     }
 
-    pub fn call(chunk: Rc<Chunk>, registers: Box<[VmValue]>, return_base: u8, expected_returns: u8, name: impl Into<String>) -> Self {
-        Self::new(chunk, registers, Some(return_base), expected_returns, name)
+    pub fn call(chunk: Rc<Chunk>, scalar_regs: Box<[u64]>, object_regs: Box<[VmValue]>, has_objects: bool, return_base: u8, expected_returns: u8, name: impl Into<String>) -> Self {
+        Self::new(chunk, scalar_regs, object_regs, has_objects, Some(return_base), expected_returns, name)
     }
 
     pub fn set_chunk(&mut self, chunk: Rc<Chunk>) {
         self.code_ptr = chunk.code.as_ptr();
         self.code_len = chunk.code.len();
+        self.has_objects = chunk.has_non_scalar_registers;
         self.chunk = chunk;
     }
 
-    fn new(chunk: Rc<Chunk>, registers: Box<[VmValue]>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
+    fn new(chunk: Rc<Chunk>, scalar_regs: Box<[u64]>, object_regs: Box<[VmValue]>, has_objects: bool, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
         let code_ptr = chunk.code.as_ptr();
         let code_len = chunk.code.len();
         Frame {
@@ -41,7 +44,9 @@ impl Frame {
             code_ptr,
             code_len,
             pc: 0,
-            registers,
+            scalar_regs,
+            object_regs,
+            has_objects,
             return_base,
             expected_returns,
             function_name: name.into(),
@@ -63,18 +68,18 @@ impl Frame {
     }
 
     pub fn get(&self, idx: u8) -> Option<&VmValue> {
-        self.registers.get(idx as usize)
+        self.object_regs.get(idx as usize)
     }
 
-    /// SAFETY: caller must guarantee idx < self.registers.len().
+    /// SAFETY: caller must guarantee idx < self.object_regs.len().
     /// Guaranteed by the bytecode validator at compile time.
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, idx: u8) -> &VmValue {
-        unsafe { self.registers.get_unchecked(idx as usize) }
+        unsafe { self.object_regs.get_unchecked(idx as usize) }
     }
 
     pub fn set(&mut self, idx: u8, value: VmValue) -> bool {
-        if let Some(slot) = self.registers.get_mut(idx as usize) {
+        if let Some(slot) = self.object_regs.get_mut(idx as usize) {
             *slot = value;
             true
         } else {
@@ -82,22 +87,22 @@ impl Frame {
         }
     }
 
-    /// SAFETY: caller must guarantee idx < self.registers.len().
+    /// SAFETY: caller must guarantee idx < self.object_regs.len().
     /// Guaranteed by the bytecode validator at compile time.
     #[inline(always)]
     pub unsafe fn set_unchecked(&mut self, idx: u8, value: VmValue) {
-        unsafe { *self.registers.get_unchecked_mut(idx as usize) = value; }
+        unsafe { *self.object_regs.get_unchecked_mut(idx as usize) = value; }
     }
 
     pub fn get_mut(&mut self, idx: u8) -> Option<&mut VmValue> {
-        self.registers.get_mut(idx as usize)
+        self.object_regs.get_mut(idx as usize)
     }
 
-    /// SAFETY: caller must guarantee idx < self.registers.len().
+    /// SAFETY: caller must guarantee idx < self.object_regs.len().
     /// Guaranteed by the bytecode validator at compile time.
     #[inline(always)]
     pub unsafe fn get_mut_unchecked(&mut self, idx: u8) -> &mut VmValue {
-        unsafe { self.registers.get_unchecked_mut(idx as usize) }
+        unsafe { self.object_regs.get_unchecked_mut(idx as usize) }
     }
 
     pub fn get_scalar(&self, idx: u8) -> Option<Register> {
@@ -118,7 +123,7 @@ impl Frame {
 
     pub fn collect_roots(&self) -> Vec<usize> {
         let mut roots = Vec::new();
-        for value in self.registers.iter() {
+        for value in self.object_regs.iter() {
             if let VmValue::Scalar(register) = value {
                 let ptr = unsafe { register.ptr };
                 if ptr != 0 {
@@ -130,45 +135,84 @@ impl Frame {
     }
 
     pub fn register_count(&self) -> usize {
-        self.registers.len()
+        self.object_regs.len()
     }
 
     pub fn register_value(&self, idx: u8) -> Option<&VmValue> {
-        self.registers.get(idx as usize)
+        self.object_regs.get(idx as usize)
+    }
+
+    #[inline(always)]
+    pub unsafe fn scalar_regs_ptr(&self) -> *const u64 {
+        self.scalar_regs.as_ptr()
+    }
+
+    #[inline(always)]
+    pub unsafe fn scalar_regs_mut_ptr(&mut self) -> *mut u64 {
+        self.scalar_regs.as_mut_ptr()
     }
 }
 
 pub struct CallStack {
     frames: Vec<Frame>,
-    register_pool: Vec<Box<[VmValue]>>,
+    scalar_pool: Vec<Box<[u64]>>,
+    object_pool: Vec<Box<[VmValue]>>,
 }
 
 impl CallStack {
     pub fn new() -> Self {
-        CallStack { frames: Vec::new(), register_pool: Vec::new() }
+        CallStack { frames: Vec::new(), scalar_pool: Vec::new(), object_pool: Vec::new() }
     }
 
     pub fn push_entry(&mut self, chunk: Rc<Chunk>, name: impl Into<String>) {
-        let regs = self.acquire_registers(chunk.max_registers as usize);
-        self.frames.push(Frame::entry(chunk, regs, name));
+        let count = chunk.max_registers as usize;
+        let has_objects = chunk.has_non_scalar_registers;
+        let (scalars, objects) = self.acquire_registers(count, has_objects);
+        self.frames.push(Frame::entry(chunk, scalars, objects, has_objects, name));
     }
 
     pub fn push_call(&mut self, chunk: Rc<Chunk>, return_base: u8, expected_returns: u8, name: impl Into<String>) {
-        let regs = self.acquire_registers(chunk.max_registers as usize);
+        let count = chunk.max_registers as usize;
+        let has_objects = chunk.has_non_scalar_registers;
+        let (scalars, objects) = self.acquire_registers(count, has_objects);
         self.frames
-            .push(Frame::call(chunk, regs, return_base, expected_returns, name));
+            .push(Frame::call(chunk, scalars, objects, has_objects, return_base, expected_returns, name));
     }
 
     pub fn pop_frame(&mut self) -> Option<Frame> {
         let mut frame = self.frames.pop()?;
-        let old_regs = std::mem::replace(&mut frame.registers, Box::new([]));
-        self.register_pool.push(old_regs);
+        let old_scalars = std::mem::replace(&mut frame.scalar_regs, Box::new([]));
+        let old_objects = std::mem::replace(&mut frame.object_regs, Box::new([]));
+        self.scalar_pool.push(old_scalars);
+        self.object_pool.push(old_objects);
         Some(frame)
     }
 
-    fn acquire_registers(&mut self, count: usize) -> Box<[VmValue]> {
-        if let Some(pos) = self.register_pool.iter().position(|r| r.len() == count) {
-            let mut regs = self.register_pool.swap_remove(pos);
+    fn acquire_registers(&mut self, count: usize, has_objects: bool) -> (Box<[u64]>, Box<[VmValue]>) {
+        let scalars = self.acquire_scalar_regs(count);
+        let objects = if has_objects {
+            self.acquire_object_regs(count)
+        } else {
+            Box::new([])
+        };
+        (scalars, objects)
+    }
+
+    fn acquire_scalar_regs(&mut self, count: usize) -> Box<[u64]> {
+        if let Some(pos) = self.scalar_pool.iter().position(|r| r.len() == count) {
+            let mut regs = self.scalar_pool.swap_remove(pos);
+            for r in regs.iter_mut() {
+                *r = 0;
+            }
+            regs
+        } else {
+            vec![0u64; count].into_boxed_slice()
+        }
+    }
+
+    fn acquire_object_regs(&mut self, count: usize) -> Box<[VmValue]> {
+        if let Some(pos) = self.object_pool.iter().position(|r| r.len() == count) {
+            let mut regs = self.object_pool.swap_remove(pos);
             for r in regs.iter_mut() {
                 *r = VmValue::zero();
             }
@@ -240,12 +284,14 @@ mod tests {
             max_registers: max_regs,
             source_map: std::collections::BTreeMap::new(),
             exception_table: Vec::new(),
+            has_non_scalar_registers: false,
         })
     }
 
     #[test]
     fn push_pop_frame() {
         let mut stack = CallStack::new();
+        let chunk = make_chunk(4);
         stack.push_entry(make_chunk(4), "entry");
         stack.push_call(make_chunk(2), 0, 1, "child");
         assert_eq!(stack.depth(), 2);
@@ -256,8 +302,9 @@ mod tests {
     #[test]
     fn frame_register_access_is_checked() {
         let chunk = make_chunk(1);
-        let regs = vec![VmValue::zero(); 1].into_boxed_slice();
-        let mut frame = Frame::entry(chunk.clone(), regs, "test");
+        let scalars = vec![0u64; 1].into_boxed_slice();
+        let objects = vec![VmValue::zero(); 1].into_boxed_slice();
+        let mut frame = Frame::entry(chunk.clone(), scalars, objects, false, "test");
         assert!(frame.set(0, VmValue::scalar(Register::from_i64(42))));
         assert!(!frame.set(1, VmValue::scalar(Register::from_i64(100))));
         unsafe {

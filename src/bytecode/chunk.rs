@@ -9,6 +9,7 @@ pub struct Chunk {
     pub(crate) max_registers: u8,
     pub(crate) source_map: BTreeMap<u32, SourceLocation>,
     pub(crate) exception_table: Vec<(u32, u32, u32)>,
+    pub has_non_scalar_registers: bool,
 }
 
 impl Chunk {
@@ -18,6 +19,7 @@ impl Chunk {
             max_registers: 0,
             source_map: BTreeMap::new(),
             exception_table: Vec::new(),
+            has_non_scalar_registers: true,
         }
     }
 
