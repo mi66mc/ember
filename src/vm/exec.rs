@@ -189,12 +189,12 @@ impl Vm {
             let code_len = frame.code_len;
             let regs_ptr = frame.registers.as_ptr() as *mut VmValue;
             let scalar_ptr = frame.scalar_regs.as_ptr() as *mut u64;
-            let raws = frame.raw_regs.as_ptr() as *mut u64;
             let frame_pc = frame.pc;
             if frame_pc >= code_len {
                 return Ok(());
             }
             let instr = unsafe { *code_ptr.add(frame_pc) };
+            let max_regs = frame.chunk.max_registers;
 
             let (opcode_byte, extended_bits) = if instr.opcode_byte == Opcode::EXT as u8 {
                 unsafe { self.stack.current_mut_unchecked() }.pc += 1;
@@ -216,36 +216,47 @@ impl Vm {
                         let constant = self.module.as_ref().unwrap()
                             .constants
                             .get(bx)
-                            .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-                        let bits = match constant {
-                            Constant::Bytes(_) => {
-                                let offset = self.constant_section.get(&bx).copied()
-                                    .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-                                unsafe { Register::from_ptr(offset).bits }
-                            }
-                            _ => constant.to_bits().expect("non-bytes constants always have scalar bits"),
-                        };
+                            .ok_or(VMError::InvalidConstantIndex(instr.bx()))?
+                            .clone();
                         unsafe {
                             let frame = self.stack.current_mut_unchecked();
-                            *raws.add(instr.a as usize) = bits;
-                            if !frame.set(instr.a, VmValue::scalar(Register { bits })) {
-                                return Err(VMError::InvalidRegister(instr.a));
+                            match constant {
+                                Constant::Bytes(_) => {
+                                    let offset = self.constant_section.get(&bx)
+                                        .copied()
+                                        .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
+                                    let val = VmValue::scalar(Register::from_ptr(offset));
+                                    *scalar_ptr.add(instr.a as usize) = val.as_scalar().unwrap_unchecked().bits;
+                                    if !frame.set(instr.a, val) {
+                                        return Err(VMError::InvalidRegister(instr.a));
+                                    }
+                                }
+                                constant => {
+                                    let bits = constant.to_bits().expect("non-bytes constants always have scalar bits");
+                                    *scalar_ptr.add(instr.a as usize) = bits;
+                                    if !frame.set(instr.a, VmValue::scalar(Register { bits })) {
+                                        return Err(VMError::InvalidRegister(instr.a));
+                                    }
+                                }
                             }
                         }
                         continue 'execute;
                     }
                     0x01 => {
-                        let scalar_val = unsafe { *raws.add(instr.b as usize) };
-                        let src_ref = unsafe { &*regs_ptr.add(instr.b as usize) };
-                        if let VmValue::Scalar(_) = src_ref {
-                            unsafe {
-                                *raws.add(instr.a as usize) = scalar_val;
-                                *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register { bits: scalar_val });
+                        let src = unsafe { &*regs_ptr.add(instr.b as usize) };
+                        let val: Register = match src {
+                            VmValue::Scalar(r) => *r,
+                            _ => {
+                                let cloned = src.clone();
+                                let frame = unsafe { self.stack.current_mut_unchecked() };
+                                if !frame.set(instr.a, cloned) { return Err(VMError::InvalidRegister(instr.a)); }
+                                continue 'execute;
                             }
-                        } else {
-                            let cloned = src_ref.clone();
-                            let frame = unsafe { self.stack.current_mut_unchecked() };
-                            if !frame.set(instr.a, cloned) { return Err(VMError::InvalidRegister(instr.a)); }
+                        };
+                        let bits = unsafe { val.bits };
+                        unsafe {
+                            *scalar_ptr.add(instr.a as usize) = bits;
+                            *regs_ptr.add(instr.a as usize) = VmValue::scalar(val);
                         }
                         continue 'execute;
                     }
@@ -261,7 +272,7 @@ impl Vm {
                         })?;
                         let result = value as i64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(value));
                         }
                         continue 'execute;
@@ -278,7 +289,7 @@ impl Vm {
                         })?;
                         let result = value as i64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(value));
                         }
                         continue 'execute;
@@ -295,7 +306,7 @@ impl Vm {
                         })?;
                         let result = value as i64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(value));
                         }
                         continue 'execute;
@@ -312,7 +323,7 @@ impl Vm {
                         })?;
                         let result = value;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(value));
                         }
                         continue 'execute;
@@ -329,7 +340,7 @@ impl Vm {
                         })?;
                         let result = value as u64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result;
+                            *scalar_ptr.add(instr.a as usize) = result;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(value));
                         }
                         continue 'execute;
@@ -346,7 +357,7 @@ impl Vm {
                         })?;
                         let result = value as u64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result;
+                            *scalar_ptr.add(instr.a as usize) = result;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(value));
                         }
                         continue 'execute;
@@ -363,7 +374,7 @@ impl Vm {
                         })?;
                         let result = value as u64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result;
+                            *scalar_ptr.add(instr.a as usize) = result;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(value));
                         }
                         continue 'execute;
@@ -380,7 +391,7 @@ impl Vm {
                         })?;
                         let result = value;
                         unsafe {
-                            *raws.add(instr.a as usize) = result;
+                            *scalar_ptr.add(instr.a as usize) = result;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(value));
                         }
                         continue 'execute;
@@ -397,7 +408,7 @@ impl Vm {
                         })?;
                         let result = value as f64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result.to_bits();
+                            *scalar_ptr.add(instr.a as usize) = result.to_bits();
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(value));
                         }
                         continue 'execute;
@@ -414,7 +425,7 @@ impl Vm {
                         })?;
                         let result = value;
                         unsafe {
-                            *raws.add(instr.a as usize) = result.to_bits();
+                            *scalar_ptr.add(instr.a as usize) = result.to_bits();
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(value));
                         }
                         continue 'execute;
@@ -580,21 +591,21 @@ impl Vm {
                         continue 'execute;
                     }
                     0x23 => {
-                        let vb = unsafe { *raws.add(instr.b as usize) } as i64;
-                        let vc = unsafe { *raws.add(instr.c as usize) } as i64;
+                        let vb = unsafe { *scalar_ptr.add(instr.b as usize) } as i64;
+                        let vc = unsafe { *scalar_ptr.add(instr.c as usize) } as i64;
                         let result = vb.wrapping_add(vc);
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
                     }
                     0x27 => {
-                        let vb = unsafe { *raws.add(instr.b as usize) } as i64;
-                        let vc = unsafe { *raws.add(instr.c as usize) } as i64;
+                        let vb = unsafe { *scalar_ptr.add(instr.b as usize) } as i64;
+                        let vc = unsafe { *scalar_ptr.add(instr.c as usize) } as i64;
                         let result = vb.wrapping_sub(vc);
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -604,7 +615,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = vb.wrapping_mul(vc);
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -615,7 +626,7 @@ impl Vm {
                         if vc == 0 { return Err(VMError::DivisionByZero); }
                         let result = vb.wrapping_div(vc);
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -626,7 +637,7 @@ impl Vm {
                         if vc == 0 { return Err(VMError::DivisionByZero); }
                         let result = vb.wrapping_rem(vc);
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -635,7 +646,7 @@ impl Vm {
                         let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = vb.wrapping_neg();
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -646,7 +657,7 @@ impl Vm {
                         if vc == 0 { return Err(VMError::DivisionByZero); }
                         let result = vb.wrapping_div(vc);
                         unsafe {
-                            *raws.add(instr.a as usize) = result;
+                            *scalar_ptr.add(instr.a as usize) = result;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(result));
                         }
                         continue 'execute;
@@ -657,7 +668,7 @@ impl Vm {
                         if vc == 0 { return Err(VMError::DivisionByZero); }
                         let result = vb.wrapping_rem(vc);
                         unsafe {
-                            *raws.add(instr.a as usize) = result;
+                            *scalar_ptr.add(instr.a as usize) = result;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(result));
                         }
                         continue 'execute;
@@ -667,7 +678,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                         let result = vb + vc;
                         unsafe {
-                            *raws.add(instr.a as usize) = result.to_bits();
+                            *scalar_ptr.add(instr.a as usize) = result.to_bits();
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                         }
                         continue 'execute;
@@ -677,7 +688,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                         let result = vb - vc;
                         unsafe {
-                            *raws.add(instr.a as usize) = result.to_bits();
+                            *scalar_ptr.add(instr.a as usize) = result.to_bits();
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                         }
                         continue 'execute;
@@ -687,7 +698,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                         let result = vb * vc;
                         unsafe {
-                            *raws.add(instr.a as usize) = result.to_bits();
+                            *scalar_ptr.add(instr.a as usize) = result.to_bits();
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                         }
                         continue 'execute;
@@ -697,7 +708,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                         let result = vb / vc;
                         unsafe {
-                            *raws.add(instr.a as usize) = result.to_bits();
+                            *scalar_ptr.add(instr.a as usize) = result.to_bits();
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                         }
                         continue 'execute;
@@ -706,7 +717,7 @@ impl Vm {
                         let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
                         let result = -vb;
                         unsafe {
-                            *raws.add(instr.a as usize) = result.to_bits();
+                            *scalar_ptr.add(instr.a as usize) = result.to_bits();
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                         }
                         continue 'execute;
@@ -716,7 +727,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = vb & vc;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -726,7 +737,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = vb | vc;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -736,7 +747,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = vb ^ vc;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -745,7 +756,7 @@ impl Vm {
                         let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = !vb;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -755,7 +766,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = vb.wrapping_shl(vc as u32);
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -765,7 +776,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = vb.wrapping_shr(vc as u32);
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -775,7 +786,7 @@ impl Vm {
                         let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                         let result = (vb as u64).wrapping_shr(vc as u32) as i64;
                         unsafe {
-                            *raws.add(instr.a as usize) = result as u64;
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                         }
                         continue 'execute;
@@ -786,7 +797,7 @@ impl Vm {
                         let result = vb == vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -797,7 +808,7 @@ impl Vm {
                         let result = vb != vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -808,7 +819,7 @@ impl Vm {
                         let result = vb < vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -819,7 +830,7 @@ impl Vm {
                         let result = vb <= vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -830,7 +841,7 @@ impl Vm {
                         let result = vb > vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -841,7 +852,7 @@ impl Vm {
                         let result = vb >= vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -852,7 +863,7 @@ impl Vm {
                         let result = vb < vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -863,7 +874,7 @@ impl Vm {
                         let result = vb <= vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -874,7 +885,7 @@ impl Vm {
                         let result = vb > vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -885,7 +896,7 @@ impl Vm {
                         let result = vb >= vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -896,7 +907,7 @@ impl Vm {
                         let result = vb == vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -907,7 +918,7 @@ impl Vm {
                         let result = vb != vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -918,7 +929,7 @@ impl Vm {
                         let result = vb < vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -929,7 +940,7 @@ impl Vm {
                         let result = vb <= vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -940,7 +951,7 @@ impl Vm {
                         let result = vb > vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -951,7 +962,7 @@ impl Vm {
                         let result = vb >= vc;
                         let bits = if result { 1u64 } else { 0u64 };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                         }
                         continue 'execute;
@@ -970,7 +981,7 @@ impl Vm {
                         );
                         let bits = unsafe { result.bits };
                         unsafe {
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             *regs_ptr.add(instr.a as usize) = VmValue::scalar(result);
                         }
                         continue 'execute;
@@ -990,7 +1001,7 @@ impl Vm {
                         } else {
                             instr.sbx()
                         };
-                        if unsafe { *raws.add(instr.a as usize) } != 0 {
+                        if unsafe { *scalar_ptr.add(instr.a as usize) } != 0 {
                             self.stack.jump(offset - 1);
                         }
                         continue 'execute;
@@ -1001,7 +1012,7 @@ impl Vm {
                         } else {
                             instr.sbx()
                         };
-                        if unsafe { *raws.add(instr.a as usize) } == 0 {
+                        if unsafe { *scalar_ptr.add(instr.a as usize) } == 0 {
                             self.stack.jump(offset - 1);
                         }
                         continue 'execute;
@@ -1064,7 +1075,7 @@ impl Vm {
                         }
                         .ok_or(VMError::InvalidRegister(idx as u8))?;
                         if let VmValue::Scalar(r) = &value {
-                            unsafe { *raws.add(dest) = r.bits; }
+                            unsafe { *scalar_ptr.add(dest) = r.bits; }
                         }
                         unsafe { *regs_ptr.add(dest) = value; }
                         continue 'execute;
@@ -1088,7 +1099,7 @@ impl Vm {
                                     .get(*function_id as usize)
                                     .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
                                 let mut upvalues = Vec::with_capacity(upvalue_count);
-                                let reg_count = unsafe { self.stack.current_unchecked().chunk.max_registers } as usize;
+                                let reg_count = max_regs as usize;
                                 let frame = unsafe { self.stack.current_unchecked() };
                                 for i in 0..upvalue_count {
                                     let reg_idx = reg_count - upvalue_count + i;
@@ -1268,7 +1279,6 @@ impl Vm {
         let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
         let regs_ptr = unsafe { self.stack.current_unchecked().registers.as_ptr() as *mut VmValue };
         let scalar_ptr = unsafe { self.stack.current_unchecked().scalar_regs.as_ptr() as *mut u64 };
-        let raws = unsafe { self.stack.current_unchecked().raw_regs.as_ptr() as *mut u64 };
         let effective_bx = instr.bx() as u32 | extended_bits;
         let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
 
@@ -1288,14 +1298,14 @@ impl Vm {
                                 .copied()
                                 .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
                             let val = VmValue::scalar(Register::from_ptr(offset));
-                            *raws.add(instr.a as usize) = val.as_scalar().unwrap_unchecked().bits;
+                            *scalar_ptr.add(instr.a as usize) = val.as_scalar().unwrap_unchecked().bits;
                             if !frame.set(instr.a, val) {
                                 return Err(VMError::InvalidRegister(instr.a));
                             }
                         }
                         constant => {
                             let bits = constant.to_bits().expect("non-bytes constants always have scalar bits");
-                            *raws.add(instr.a as usize) = bits;
+                            *scalar_ptr.add(instr.a as usize) = bits;
                             if !frame.set(instr.a, VmValue::scalar(Register { bits })) {
                                 return Err(VMError::InvalidRegister(instr.a));
                             }
@@ -1321,7 +1331,7 @@ impl Vm {
                 };
                 let bits = unsafe { val.bits };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     let frame = self.stack.current_mut_unchecked();
                     if !frame.set(instr.a, VmValue::scalar(val)) {
                         return Err(VMError::InvalidRegister(instr.a));
@@ -1336,7 +1346,7 @@ impl Vm {
                 let value = self.memory.read_checked::<i8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i8>() })?;
                 let result = value as i64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i8(value));
                 }
                 Ok(())
@@ -1348,7 +1358,7 @@ impl Vm {
                 let value = self.memory.read_checked::<i16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i16>() })?;
                 let result = value as i64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i16(value));
                 }
                 Ok(())
@@ -1360,7 +1370,7 @@ impl Vm {
                 let value = self.memory.read_checked::<i32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i32>() })?;
                 let result = value as i64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i32(value));
                 }
                 Ok(())
@@ -1372,7 +1382,7 @@ impl Vm {
                 let value = self.memory.read_checked::<i64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<i64>() })?;
                 let result = value;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(value));
                 }
                 Ok(())
@@ -1384,7 +1394,7 @@ impl Vm {
                 let value = self.memory.read_checked::<u8>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u8>() })?;
                 let result = value as u64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result;
+                    *scalar_ptr.add(instr.a as usize) = result;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u8(value));
                 }
                 Ok(())
@@ -1396,7 +1406,7 @@ impl Vm {
                 let value = self.memory.read_checked::<u16>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u16>() })?;
                 let result = value as u64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result;
+                    *scalar_ptr.add(instr.a as usize) = result;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u16(value));
                 }
                 Ok(())
@@ -1408,7 +1418,7 @@ impl Vm {
                 let value = self.memory.read_checked::<u32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u32>() })?;
                 let result = value as u64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result;
+                    *scalar_ptr.add(instr.a as usize) = result;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u32(value));
                 }
                 Ok(())
@@ -1420,7 +1430,7 @@ impl Vm {
                 let value = self.memory.read_checked::<u64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<u64>() })?;
                 let result = value;
                 unsafe {
-                    *raws.add(instr.a as usize) = result;
+                    *scalar_ptr.add(instr.a as usize) = result;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(value));
                 }
                 Ok(())
@@ -1432,7 +1442,7 @@ impl Vm {
                 let value = self.memory.read_checked::<f32>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<f32>() })?;
                 let result = value as f64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result.to_bits();
+                    *scalar_ptr.add(instr.a as usize) = result.to_bits();
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f32(value));
                 }
                 Ok(())
@@ -1444,7 +1454,7 @@ impl Vm {
                 let value = self.memory.read_checked::<f64>(addr).ok_or(VMError::MemoryOutOfBounds { pc: frame_pc, addr, size: size_of::<f64>() })?;
                 let result = value;
                 unsafe {
-                    *raws.add(instr.a as usize) = result.to_bits();
+                    *scalar_ptr.add(instr.a as usize) = result.to_bits();
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(value));
                 }
                 Ok(())
@@ -1550,21 +1560,21 @@ impl Vm {
                 Ok(())
             }
             0x23 => {
-                let vb = unsafe { *raws.add(instr.b as usize) } as i64;
-                let vc = unsafe { *raws.add(instr.c as usize) } as i64;
+                let vb = unsafe { *scalar_ptr.add(instr.b as usize) } as i64;
+                let vc = unsafe { *scalar_ptr.add(instr.c as usize) } as i64;
                 let result = vb.wrapping_add(vc);
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
             }
             0x27 => {
-                let vb = unsafe { *raws.add(instr.b as usize) } as i64;
-                let vc = unsafe { *raws.add(instr.c as usize) } as i64;
+                let vb = unsafe { *scalar_ptr.add(instr.b as usize) } as i64;
+                let vc = unsafe { *scalar_ptr.add(instr.c as usize) } as i64;
                 let result = vb.wrapping_sub(vc);
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1574,7 +1584,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = vb.wrapping_mul(vc);
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1585,7 +1595,7 @@ impl Vm {
                 if vc == 0 { return Err(VMError::DivisionByZero); }
                 let result = vb.wrapping_div(vc);
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1596,7 +1606,7 @@ impl Vm {
                 if vc == 0 { return Err(VMError::DivisionByZero); }
                 let result = vb.wrapping_rem(vc);
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1605,7 +1615,7 @@ impl Vm {
                 let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = vb.wrapping_neg();
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1616,7 +1626,7 @@ impl Vm {
                 if vc == 0 { return Err(VMError::DivisionByZero); }
                 let result = vb.wrapping_div(vc);
                 unsafe {
-                    *raws.add(instr.a as usize) = result;
+                    *scalar_ptr.add(instr.a as usize) = result;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(result));
                 }
                 Ok(())
@@ -1627,7 +1637,7 @@ impl Vm {
                 if vc == 0 { return Err(VMError::DivisionByZero); }
                 let result = vb.wrapping_rem(vc);
                 unsafe {
-                    *raws.add(instr.a as usize) = result;
+                    *scalar_ptr.add(instr.a as usize) = result;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_u64(result));
                 }
                 Ok(())
@@ -1637,7 +1647,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                 let result = vb + vc;
                 unsafe {
-                    *raws.add(instr.a as usize) = result.to_bits();
+                    *scalar_ptr.add(instr.a as usize) = result.to_bits();
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                 }
                 Ok(())
@@ -1647,7 +1657,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                 let result = vb - vc;
                 unsafe {
-                    *raws.add(instr.a as usize) = result.to_bits();
+                    *scalar_ptr.add(instr.a as usize) = result.to_bits();
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                 }
                 Ok(())
@@ -1657,7 +1667,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                 let result = vb * vc;
                 unsafe {
-                    *raws.add(instr.a as usize) = result.to_bits();
+                    *scalar_ptr.add(instr.a as usize) = result.to_bits();
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                 }
                 Ok(())
@@ -1667,7 +1677,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().f64 };
                 let result = vb / vc;
                 unsafe {
-                    *raws.add(instr.a as usize) = result.to_bits();
+                    *scalar_ptr.add(instr.a as usize) = result.to_bits();
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                 }
                 Ok(())
@@ -1676,7 +1686,7 @@ impl Vm {
                 let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().f64 };
                 let result = -vb;
                 unsafe {
-                    *raws.add(instr.a as usize) = result.to_bits();
+                    *scalar_ptr.add(instr.a as usize) = result.to_bits();
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_f64(result));
                 }
                 Ok(())
@@ -1686,7 +1696,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = vb & vc;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1696,7 +1706,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = vb | vc;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1706,7 +1716,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = vb ^ vc;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1715,7 +1725,7 @@ impl Vm {
                 let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = !vb;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1725,7 +1735,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = vb.wrapping_shl(vc as u32);
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1735,7 +1745,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = vb.wrapping_shr(vc as u32);
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1745,7 +1755,7 @@ impl Vm {
                 let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
                 let result = (vb as u64).wrapping_shr(vc as u32) as i64;
                 unsafe {
-                    *raws.add(instr.a as usize) = result as u64;
+                    *scalar_ptr.add(instr.a as usize) = result as u64;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
                 }
                 Ok(())
@@ -1756,7 +1766,7 @@ impl Vm {
                 let result = vb == vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1767,7 +1777,7 @@ impl Vm {
                 let result = vb != vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1778,7 +1788,7 @@ impl Vm {
                 let result = vb < vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1789,7 +1799,7 @@ impl Vm {
                 let result = vb <= vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1800,7 +1810,7 @@ impl Vm {
                 let result = vb > vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1811,7 +1821,7 @@ impl Vm {
                 let result = vb >= vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1822,7 +1832,7 @@ impl Vm {
                 let result = vb < vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1833,7 +1843,7 @@ impl Vm {
                 let result = vb <= vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1844,7 +1854,7 @@ impl Vm {
                 let result = vb > vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1855,7 +1865,7 @@ impl Vm {
                 let result = vb >= vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1866,7 +1876,7 @@ impl Vm {
                 let result = vb == vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1877,7 +1887,7 @@ impl Vm {
                 let result = vb != vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1888,7 +1898,7 @@ impl Vm {
                 let result = vb < vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1899,7 +1909,7 @@ impl Vm {
                 let result = vb <= vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1910,7 +1920,7 @@ impl Vm {
                 let result = vb > vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1921,7 +1931,7 @@ impl Vm {
                 let result = vb >= vc;
                 let bits = if result { 1u64 } else { 0u64 };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_bool(result));
                 }
                 Ok(())
@@ -1940,7 +1950,7 @@ impl Vm {
                 );
                 let bits = unsafe { result.bits };
                 unsafe {
-                    *raws.add(instr.a as usize) = bits;
+                    *scalar_ptr.add(instr.a as usize) = bits;
                     *regs_ptr.add(instr.a as usize) = VmValue::scalar(result);
                 }
                 Ok(())
@@ -1952,14 +1962,14 @@ impl Vm {
             }
             0xD1 => {
                 let offset = if extended_bits != 0 { (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16 } else { instr.sbx() };
-                if unsafe { *raws.add(instr.a as usize) } != 0 {
+                if unsafe { *scalar_ptr.add(instr.a as usize) } != 0 {
                     self.stack.jump(offset - 1);
                 }
                 Ok(())
             }
             0xD2 => {
                 let offset = if extended_bits != 0 { (((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32)) as i16 } else { instr.sbx() };
-                if unsafe { *raws.add(instr.a as usize) } == 0 {
+                if unsafe { *scalar_ptr.add(instr.a as usize) } == 0 {
                     self.stack.jump(offset - 1);
                 }
                 Ok(())
