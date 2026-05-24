@@ -188,6 +188,7 @@ impl Vm {
             let code_ptr = frame.code_ptr;
             let code_len = frame.code_len;
             let regs_ptr = frame.registers.as_ptr() as *mut VmValue;
+            let scalar_ptr = frame.scalar_regs.as_ptr() as *mut u64;
             let frame_pc = frame.pc;
             if frame_pc >= code_len {
                 return Ok(());
@@ -227,12 +228,16 @@ impl Vm {
                                     let offset = self.constant_section.get(&bx)
                                         .copied()
                                         .ok_or(VMError::InvalidConstantIndex(instr.bx()))?;
-                                    if !frame.set(instr.a, VmValue::scalar(Register::from_ptr(offset))) {
+                                    let val = VmValue::scalar(Register::from_ptr(offset));
+                                    unsafe { *scalar_ptr.add(instr.a as usize) = val.as_scalar().unwrap_unchecked().bits; }
+                                    if !frame.set(instr.a, val) {
                                         return Err(VMError::InvalidRegister(instr.a));
                                     }
                                 }
                                 constant => {
-                                    if !frame.set(instr.a, VmValue::scalar(Register { bits: constant.to_bits().expect("non-bytes constants always have scalar bits") })) {
+                                    let bits = constant.to_bits().expect("non-bytes constants always have scalar bits");
+                                    unsafe { *scalar_ptr.add(instr.a as usize) = bits; }
+                                    if !frame.set(instr.a, VmValue::scalar(Register { bits })) {
                                         return Err(VMError::InvalidRegister(instr.a));
                                     }
                                 }
@@ -246,20 +251,15 @@ impl Vm {
                             VmValue::Scalar(r) => *r,
                             _ => {
                                 let cloned = src.clone();
-                                unsafe {
-                                    let frame = self.stack.current_mut_unchecked();
-                                    if !frame.set(instr.a, cloned) {
-                                        return Err(VMError::InvalidRegister(instr.a));
-                                    }
-                                }
+                                let frame = unsafe { self.stack.current_mut_unchecked() };
+                                if !frame.set(instr.a, cloned) { return Err(VMError::InvalidRegister(instr.a)); }
                                 continue 'execute;
                             }
                         };
+                        let bits = unsafe { val.bits };
                         unsafe {
-                            let frame = self.stack.current_mut_unchecked();
-                            if !frame.set(instr.a, VmValue::scalar(val)) {
-                                return Err(VMError::InvalidRegister(instr.a));
-                            }
+                            *scalar_ptr.add(instr.a as usize) = bits;
+                            *regs_ptr.add(instr.a as usize) = VmValue::scalar(val);
                         }
                         continue 'execute;
                     }
@@ -554,15 +554,23 @@ impl Vm {
                         continue 'execute;
                     }
                     0x23 => {
-                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
-                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
-                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_add(vc))); }
+                        let vb = unsafe { *scalar_ptr.add(instr.b as usize) } as i64;
+                        let vc = unsafe { *scalar_ptr.add(instr.c as usize) } as i64;
+                        let result = vb.wrapping_add(vc);
+                        unsafe {
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
+                            *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
+                        }
                         continue 'execute;
                     }
                     0x27 => {
-                        let vb = unsafe { (*regs_ptr.add(instr.b as usize)).as_scalar().unwrap_unchecked().i64 };
-                        let vc = unsafe { (*regs_ptr.add(instr.c as usize)).as_scalar().unwrap_unchecked().i64 };
-                        unsafe { *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(vb.wrapping_sub(vc))); }
+                        let vb = unsafe { *scalar_ptr.add(instr.b as usize) } as i64;
+                        let vc = unsafe { *scalar_ptr.add(instr.c as usize) } as i64;
+                        let result = vb.wrapping_sub(vc);
+                        unsafe {
+                            *scalar_ptr.add(instr.a as usize) = result as u64;
+                            *regs_ptr.add(instr.a as usize) = VmValue::scalar(Register::from_i64(result));
+                        }
                         continue 'execute;
                     }
                     0x2B => {
@@ -811,7 +819,7 @@ impl Vm {
                         } else {
                             instr.sbx()
                         };
-                        if unsafe { (*regs_ptr.add(instr.a as usize)).as_scalar().unwrap_unchecked().u64 } == 0 {
+                        if unsafe { *scalar_ptr.add(instr.a as usize) } == 0 {
                             self.stack.jump(offset - 1);
                         }
                         continue 'execute;
@@ -861,6 +869,9 @@ impl Vm {
                             _ => return Err(VMError::ExpectedFunction(instr.c)),
                         }
                         .ok_or(VMError::InvalidRegister(idx as u8))?;
+                        if let VmValue::Scalar(r) = &value {
+                            unsafe { *scalar_ptr.add(dest) = r.bits; }
+                        }
                         unsafe { *regs_ptr.add(dest) = value; }
                         continue 'execute;
                     }
@@ -1769,7 +1780,11 @@ impl Vm {
 
     #[inline(always)]
     pub unsafe fn set_value_unchecked(&mut self, register: u8, value: VmValue) {
-        unsafe { self.stack.current_mut_unchecked().set_unchecked(register, value); }
+        let frame = unsafe { self.stack.current_mut_unchecked() };
+        if let VmValue::Scalar(r) = &value {
+            unsafe { *frame.scalar_regs.get_unchecked_mut(register as usize) = r.bits; }
+        }
+        unsafe { frame.set_unchecked(register, value); }
     }
 
     pub fn collect_roots(&self) -> Vec<usize> {
@@ -1833,6 +1848,16 @@ impl Vm {
                 unsafe { self.set_value_unchecked(index as u8, value); }
             }
             unsafe { self.set_value_unchecked(arg_count, callable); }
+            // Sync scalar_regs for the new frame
+            {
+                let frame = unsafe { self.stack.current_unchecked() };
+                let sp = frame.scalar_regs.as_ptr() as *mut u64;
+                for i in 0..=arg_count as usize {
+                    if let VmValue::Scalar(r) = unsafe { frame.get_unchecked(i as u8) } {
+                        unsafe { *sp.add(i) = r.bits; }
+                    }
+                }
+            }
             return Ok(());
         }
 
@@ -1846,6 +1871,16 @@ impl Vm {
             unsafe { self.set_value_unchecked(arg_count, callable); }
             for (index, value) in args.into_iter().enumerate() {
                 unsafe { self.set_value_unchecked(index as u8, value); }
+            }
+            // Sync scalar_regs
+            {
+                let frame = unsafe { self.stack.current_unchecked() };
+                let sp = frame.scalar_regs.as_ptr() as *mut u64;
+                for i in 0..=arg_count as usize {
+                    if let VmValue::Scalar(r) = unsafe { frame.get_unchecked(i as u8) } {
+                        unsafe { *sp.add(i) = r.bits; }
+                    }
+                }
             }
             return Ok(());
         }

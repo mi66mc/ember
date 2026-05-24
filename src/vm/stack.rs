@@ -11,6 +11,7 @@ pub struct Frame {
     pub(crate) code_len: usize,
     pub(crate) pc: usize,
     pub(crate) registers: Box<[VmValue]>,
+    pub(crate) scalar_regs: Box<[u64]>,    // Mirror: scalar values as raw u64, synchronized with registers
     pub(crate) return_base: Option<u8>,
     pub(crate) expected_returns: u8,
     pub(crate) function_name: String,
@@ -36,12 +37,14 @@ impl Frame {
     fn new(chunk: Rc<Chunk>, registers: Box<[VmValue]>, return_base: Option<u8>, expected_returns: u8, name: impl Into<String>) -> Self {
         let code_ptr = chunk.code.as_ptr();
         let code_len = chunk.code.len();
+        let reg_count = registers.len();
         Frame {
             chunk,
             code_ptr,
             code_len,
             pc: 0,
             registers,
+            scalar_regs: vec![0u64; reg_count].into_boxed_slice(),
             return_base,
             expected_returns,
             function_name: name.into(),
