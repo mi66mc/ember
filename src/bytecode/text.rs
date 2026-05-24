@@ -260,7 +260,7 @@ fn is_instruction(tokens: &[String]) -> bool {
             .all(|ch| ch.is_ascii_digit())
 }
 
-pub fn validate_module(module: &mut Module) -> Result<(), String> {
+pub fn validate_module(module: &Module) -> Result<(), String> {
     if let Some(entry) = module.entry {
         if entry as usize >= module.functions.len() {
             return Err(format!("entry function {entry} does not exist"));
@@ -296,12 +296,6 @@ pub fn validate_module(module: &mut Module) -> Result<(), String> {
         for (pc, instr) in function.chunk.code.iter().enumerate() {
             validate_instruction(module, function_id, function.chunk.max_registers, pc, instr)?;
         }
-    }
-    for function in module.functions.iter_mut() {
-        let has_non_scalar = function.chunk.code.iter().any(|instr| {
-            matches!(instr.opcode(), Opcode::CLOSURE | Opcode::GETUPVAL | Opcode::SETUPVAL)
-        });
-        function.chunk.has_non_scalar_registers = has_non_scalar;
     }
     Ok(())
 }

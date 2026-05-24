@@ -29,13 +29,6 @@ use std::rc::Rc;
 use crate::bytecode::Chunk;
 use crate::vm::native::ImportIndex;
 
-#[derive(Clone, Debug)]
-pub struct ClosureData {
-    pub chunk: Rc<Chunk>,
-    pub upvalues: Rc<UnsafeCell<Vec<VmValue>>>,
-}
-
-
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub union Register {
@@ -124,7 +117,7 @@ pub enum VmValue {
     Scalar(Register),
     Function(Rc<Chunk>),
     NativeImport(ImportIndex),
-    Closure(Box<ClosureData>),
+    Closure { chunk: Rc<Chunk>, upvalues: Rc<UnsafeCell<Vec<VmValue>>> },
 }
 
 impl PartialEq for VmValue {
@@ -133,8 +126,8 @@ impl PartialEq for VmValue {
             (VmValue::Scalar(a), VmValue::Scalar(b)) => a == b,
             (VmValue::Function(a), VmValue::Function(b)) => Rc::ptr_eq(a, b),
             (VmValue::NativeImport(a), VmValue::NativeImport(b)) => a == b,
-            (VmValue::Closure(a), VmValue::Closure(b)) => {
-                Rc::ptr_eq(&a.chunk, &b.chunk) && unsafe { &*a.upvalues.get() == &*b.upvalues.get() }
+            (VmValue::Closure { chunk: a, upvalues: ua }, VmValue::Closure { chunk: b, upvalues: ub }) => {
+                Rc::ptr_eq(a, b) && unsafe { &*ua.get() == &*ub.get() }
             }
             _ => false,
         }
@@ -157,10 +150,7 @@ impl VmValue {
     }
 
     pub fn closure(chunk: Rc<Chunk>, upvalues: Vec<VmValue>) -> Self {
-        VmValue::Closure(Box::new(ClosureData {
-            chunk,
-            upvalues: Rc::new(UnsafeCell::new(upvalues)),
-        }))
+        VmValue::Closure { chunk, upvalues: Rc::new(UnsafeCell::new(upvalues)) }
     }
 
     pub fn zero() -> Self {
@@ -170,13 +160,13 @@ impl VmValue {
     pub fn as_scalar(&self) -> Option<Register> {
         match self {
             VmValue::Scalar(register) => Some(*register),
-            VmValue::Function(_) | VmValue::NativeImport(_) | VmValue::Closure(_) => None,
+            VmValue::Function(_) | VmValue::NativeImport(_) | VmValue::Closure { .. } => None,
         }
     }
 
     pub fn as_function(&self) -> Option<Rc<Chunk>> {
         match self {
-            VmValue::Scalar(_) | VmValue::NativeImport(_) | VmValue::Closure(_) => None,
+            VmValue::Scalar(_) | VmValue::NativeImport(_) | VmValue::Closure { .. } => None,
             VmValue::Function(chunk) => Some(chunk.clone()),
         }
     }
@@ -184,13 +174,13 @@ impl VmValue {
     pub fn as_native_import(&self) -> Option<ImportIndex> {
         match self {
             VmValue::NativeImport(index) => Some(*index),
-            VmValue::Scalar(_) | VmValue::Function(_) | VmValue::Closure(_) => None,
+            VmValue::Scalar(_) | VmValue::Function(_) | VmValue::Closure { .. } => None,
         }
     }
 
-    pub fn as_closure(&self) -> Option<&ClosureData> {
+    pub fn as_closure(&self) -> Option<(&Rc<Chunk>, &Rc<UnsafeCell<Vec<VmValue>>>)> {
         match self {
-            VmValue::Closure(data) => Some(data),
+            VmValue::Closure { chunk, upvalues } => Some((chunk, upvalues)),
             _ => None,
         }
     }

@@ -22,25 +22,25 @@ fn run_cli(args: Vec<String>) -> Result<(), String> {
     match command {
         "run" => {
             let path = arg_path(&args, 1)?;
-            let mut module = load_module_with_links(&path)?;
+            let module = load_module_with_links(&path)?;
             require_entry(&module)?;
-            check_imports(&mut module)?;
+            check_imports(&module)?;
             run_module(module)
         }
         "check" => {
             let path = arg_path(&args, 1)?;
-            let mut module = load_module_with_links(&path)?;
+            let module = load_module_with_links(&path)?;
             require_entry(&module)?;
-            check_imports(&mut module)?;
+            check_imports(&module)?;
             println!("ok");
             Ok(())
         }
         "build" => {
             let input = arg_path(&args, 1)?;
             let output = parse_output_path(&args)?;
-            let mut module = load_module_with_links(&input)?;
+            let module = load_module_with_links(&input)?;
             require_entry(&module)?;
-            check_imports(&mut module)?;
+            check_imports(&module)?;
             let bytes =
                 encode_module(&module).map_err(|error| format!("encode error: {error:?}"))?;
             fs::write(&output, bytes)
@@ -98,11 +98,11 @@ fn load_module(path: &Path) -> Result<Module, String> {
 fn load_module_with_links(path: &Path) -> Result<Module, String> {
     let raw = load_module(path)?;
     let dir = path.parent().unwrap_or(Path::new("."));
-    let mut merged = link_modules(raw, &|link_path| {
+    let merged = link_modules(raw, &|link_path| {
         let resolved = dir.join(link_path);
         load_module(&resolved)
     })?;
-    validate_module(&mut merged).map_err(|error| format!("validation error: {error}"))?;
+    validate_module(&merged).map_err(|error| format!("validation error: {error}"))?;
     Ok(merged)
 }
 
@@ -112,7 +112,7 @@ fn load_text_module(path: &Path) -> Result<Module, String> {
     parse_module(&source).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn check_imports(module: &mut Module) -> Result<(), String> {
+fn check_imports(module: &Module) -> Result<(), String> {
     validate_module(module).map_err(|error| format!("validation error: {error}"))?;
     let linker = std_linker();
     for callable in module.callables() {
