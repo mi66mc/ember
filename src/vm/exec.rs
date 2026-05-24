@@ -195,8 +195,6 @@ impl Vm {
                 return Ok(());
             }
             let instr = unsafe { *code_ptr.add(frame_pc) };
-            let max_regs = frame.chunk.max_registers;
-
             // Handle EXT prefix
             let (opcode_byte, extended_bits, error_pc) = if instr.opcode_byte == Opcode::EXT as u8 {
                 unsafe { self.stack.current_mut_unchecked() }.pc += 1;
@@ -215,6 +213,7 @@ impl Vm {
             let effective_bx = instr.bx() as u32 | extended_bits;
             let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
 
+            // Keep in sync with step
             match opcode_byte {
                     // LOADK
                     0x00 => {
@@ -1624,53 +1623,53 @@ impl Vm {
                         unsafe { *regs_ptr.add(dest) = value; }
                         continue 'execute;
                     }
-                    // CLOSURE
-                    0xD7 => {
-                        let upvalue_count = instr.c as usize;
-                        let callable_idx = if extended_bits != 0 {
-                            (instr.b as u32 | (extended_bits >> 16)) as usize
-                        } else {
-                            instr.b as usize
-                        };
-                        let module = self.module.as_ref().unwrap();
-                        let closure = match module
-                            .callables
-                            .get(callable_idx)
-                            .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
-                        {
-                            Callable::Function(function_id) => {
-                                let function = module
-                                    .functions
-                                    .get(*function_id as usize)
-                                    .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
-                                let mut upvalues = Vec::with_capacity(upvalue_count);
-                                let reg_count = max_regs as usize;
-                                let frame = unsafe { self.stack.current_unchecked() };
-                                for i in 0..upvalue_count {
-                                    let reg_idx = reg_count - upvalue_count + i;
-                                    upvalues.push(
-                                        unsafe { frame.get_unchecked(reg_idx as u8) }.clone(),
-                                    );
-                                }
-                                VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
-                            }
-                            Callable::Import(import_idx) => {
-                                let import_decl = module
-                                    .imports
-                                    .get(*import_idx as usize)
-                                    .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
-                                let resolved = self
-                                    .linker
-                                    .resolve(import_decl)
-                                    .ok_or_else(|| {
-                                        VMError::UnresolvedNativeImport(import_decl.to_string())
-                                    })?;
-                                VmValue::native_import(resolved)
-                            }
-                        };
-                        unsafe { *regs_ptr.add(instr.a as usize) = closure; }
-                        continue 'execute;
-                    }
+                     // CLOSURE
+                     0xD7 => {
+                         let upvalue_count = instr.c as usize;
+                         let callable_idx = if extended_bits != 0 {
+                             (instr.b as u32 | (extended_bits >> 16)) as usize
+                         } else {
+                             instr.b as usize
+                         };
+                         let module = self.module.as_ref().unwrap();
+                         let closure = match module
+                             .callables
+                             .get(callable_idx)
+                             .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
+                         {
+                             Callable::Function(function_id) => {
+                                 let function = module
+                                     .functions
+                                     .get(*function_id as usize)
+                                     .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
+                                 let mut upvalues = Vec::with_capacity(upvalue_count);
+                                 let frame = unsafe { self.stack.current_unchecked() };
+                                 let reg_count = frame.chunk.max_registers as usize;
+                                 for i in 0..upvalue_count {
+                                     let reg_idx = reg_count - upvalue_count + i;
+                                     upvalues.push(
+                                         unsafe { frame.get_unchecked(reg_idx as u8) }.clone(),
+                                     );
+                                 }
+                                 VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
+                             }
+                             Callable::Import(import_idx) => {
+                                 let import_decl = module
+                                     .imports
+                                     .get(*import_idx as usize)
+                                     .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
+                                 let resolved = self
+                                     .linker
+                                     .resolve(import_decl)
+                                     .ok_or_else(|| {
+                                         VMError::UnresolvedNativeImport(import_decl.to_string())
+                                     })?;
+                                 VmValue::native_import(resolved)
+                             }
+                         };
+                         unsafe { *regs_ptr.add(instr.a as usize) = closure; }
+                         continue 'execute;
+                     }
                     // CALL
                     0xD8 => {
                         self.call(instr.a, instr.b, instr.c)?;
@@ -1823,11 +1822,11 @@ impl Vm {
         };
 
         let error_pc = unsafe { self.stack.current_unchecked().pc.wrapping_sub(1) };
-        let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
         let regs_ptr = unsafe { self.stack.current_unchecked().registers.as_ptr() as *mut VmValue };
         let effective_bx = instr.bx() as u32 | extended_bits;
         let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
 
+        // Keep in sync with run_module
         match instr.opcode_byte {
             // LOADK
             0x00 => {
@@ -3129,35 +3128,35 @@ impl Vm {
                     .get(callable_idx)
                     .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?
                 {
-                    Callable::Function(function_id) => {
-                        let function = module
-                            .functions
-                            .get(*function_id as usize)
-                            .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
-                        let mut upvalues = Vec::with_capacity(upvalue_count);
-                        let reg_count = max_regs as usize;
-                        let frame = unsafe { self.stack.current_unchecked() };
-                        for i in 0..upvalue_count {
-                            let reg_idx = reg_count - upvalue_count + i;
-                            upvalues.push(
-                                unsafe { frame.get_unchecked(reg_idx as u8) }.clone(),
-                            );
-                        }
-                        VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
-                    }
-                    Callable::Import(import_idx) => {
-                        let import_decl = module
-                            .imports
-                            .get(*import_idx as usize)
-                            .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
-                        let resolved = self
-                            .linker
-                            .resolve(import_decl)
-                            .ok_or_else(|| {
-                                VMError::UnresolvedNativeImport(import_decl.to_string())
-                            })?;
-                        VmValue::native_import(resolved)
-                    }
+                     Callable::Function(function_id) => {
+                         let function = module
+                             .functions
+                             .get(*function_id as usize)
+                             .ok_or(VMError::InvalidFunctionIndex(*function_id))?;
+                         let mut upvalues = Vec::with_capacity(upvalue_count);
+                         let frame = unsafe { self.stack.current_unchecked() };
+                         let reg_count = frame.chunk.max_registers as usize;
+                         for i in 0..upvalue_count {
+                             let reg_idx = reg_count - upvalue_count + i;
+                             upvalues.push(
+                                 unsafe { frame.get_unchecked(reg_idx as u8) }.clone(),
+                             );
+                         }
+                         VmValue::closure(Rc::new(function.chunk.clone()), upvalues)
+                     }
+                     Callable::Import(import_idx) => {
+                         let import_decl = module
+                             .imports
+                             .get(*import_idx as usize)
+                             .ok_or(VMError::InvalidCallableIndex(callable_idx as u16))?;
+                         let resolved = self
+                             .linker
+                             .resolve(import_decl)
+                             .ok_or_else(|| {
+                                 VMError::UnresolvedNativeImport(import_decl.to_string())
+                             })?;
+                         VmValue::native_import(resolved)
+                     }
                 };
                 unsafe { *regs_ptr.add(instr.a as usize) = closure; }
                 Ok(())
