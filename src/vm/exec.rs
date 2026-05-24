@@ -1267,6 +1267,7 @@ impl Vm {
         let max_regs = unsafe { self.stack.current_unchecked().chunk.max_registers };
         let regs_ptr = unsafe { self.stack.current_unchecked().registers.as_ptr() as *mut VmValue };
         let scalar_ptr = unsafe { self.stack.current_unchecked().scalar_regs.as_ptr() as *mut u64 };
+        let raws = unsafe { self.stack.current_unchecked().raw_regs.as_ptr() as *mut u64 };
         let effective_bx = instr.bx() as u32 | extended_bits;
         let effective_offset = ((instr.a as u16 as i16) | ((instr.b as i16) << 8)) as i32 | (extended_bits as i32);
 
