@@ -189,8 +189,6 @@ impl Vm {
             let code_len = frame.code_len;
             let regs_ptr = frame.registers.as_ptr() as *mut VmValue;
             let scalar_ptr = frame.scalar_regs.as_ptr() as *mut u64;
-            let raws = frame.raw_regs.as_ptr() as *mut u64;  // single-write target
-            let raws = frame.raw_regs.as_ptr() as *mut u64;  // new single-write array
             let frame_pc = frame.pc;
             if frame_pc >= code_len {
                 return Ok(());
