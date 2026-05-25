@@ -16,7 +16,6 @@ use crate::bytecode::import::{ImportDecl, ImportKind};
 //    Memory's bump allocator ensures fresh allocations don't alias.
 
 use crate::vm::memory::Memory;
-use crate::vm::register::{Register, VmValue};
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -36,12 +35,12 @@ impl NativeError {
     }
 }
 
-pub type NativeResult = Result<Vec<VmValue>, NativeError>;
+pub type NativeResult = Result<Vec<u64>, NativeError>;
 
 pub trait NativeModule: Send + Sync {
     fn name(&self) -> &str;
     fn exports(&self) -> u16;
-    fn call(&self, index: u16, args: &[VmValue], memory: &mut Memory) -> NativeResult;
+    fn call(&self, index: u16, args: &[u64], memory: &mut Memory) -> NativeResult;
     fn function_index(&self, name: &str) -> Option<u16>;
 }
 
@@ -88,9 +87,9 @@ impl NativeLinker {
     pub fn call(
         &self,
         index: ImportIndex,
-        args: &[VmValue],
+        args: &[u64],
         memory: &mut Memory,
-    ) -> Result<Vec<VmValue>, NativeError> {
+    ) -> Result<Vec<u64>, NativeError> {
         let module = self
             .modules
             .get(index.module as usize)
@@ -106,74 +105,43 @@ impl NativeLinker {
     }
 }
 
-fn scalar_arg(args: &[VmValue], name: &str) -> Result<Register, NativeError> {
-    if args.is_empty() {
-        return Err(NativeError::new(format!(
-            "{name} expects at least 1 argument, got 0"
-        )));
-    }
-    args[0]
-        .as_scalar()
-        .ok_or_else(|| NativeError::new(format!("{name} expects a scalar argument")))
-}
-
-#[inline(always)]
-unsafe fn scalar_arg_unchecked(args: &[VmValue]) -> Register {
-    unsafe { args.get_unchecked(0).as_scalar().unwrap_unchecked() }
-}
-
-#[inline(always)]
-unsafe fn scalar_arg_at_unchecked(args: &[VmValue], idx: usize) -> Register {
-    unsafe { args.get_unchecked(idx).as_scalar().unwrap_unchecked() }
-}
-
-fn print_i64(args: &[VmValue]) -> NativeResult {
-    // SAFETY: per file-level contract, CALL passes arguments matching the
-    // expected type; reading i64 from the Register is sound
-    let value = unsafe { scalar_arg_unchecked(args).i64 };
+fn print_i64(args: &[u64]) -> NativeResult {
+    let value = args[0] as i64;
     println!("{value}");
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
-fn print_u64(args: &[VmValue]) -> NativeResult {
-    // SAFETY: see file-level safety contract
-    let value = unsafe { scalar_arg_unchecked(args).u64 };
+fn print_u64(args: &[u64]) -> NativeResult {
+    let value = args[0];
     println!("{value}");
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
-fn print_f64(args: &[VmValue]) -> NativeResult {
-    // SAFETY: see file-level safety contract
-    let value = unsafe { scalar_arg_unchecked(args).f64 };
+fn print_f64(args: &[u64]) -> NativeResult {
+    let value = f64::from_bits(args[0]);
     println!("{value}");
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
-fn print_bool(args: &[VmValue]) -> NativeResult {
-    // SAFETY: see file-level safety contract; reading u64 is always sound
-    let value = unsafe { scalar_arg_unchecked(args).u64 != 0 };
+fn print_bool(args: &[u64]) -> NativeResult {
+    let value = args[0] != 0;
     println!("{value}");
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
-fn print_mem(args: &[VmValue], memory: &Memory) -> NativeResult {
+fn print_mem(args: &[u64], memory: &Memory) -> NativeResult {
     if args.len() < 2 {
         return Err(NativeError::new("io.print_mem expects 2 arguments (ptr, len)"));
     }
-    // SAFETY: see file-level safety contract; pointer arguments are written
-    // via from_ptr / from_u64 by the compiler
-    let ptr = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
-    let len = unsafe { scalar_arg_at_unchecked(args, 1).u64 as usize };
+    let ptr = args[0] as usize;
+    let len = args[1] as usize;
     if ptr + len > memory.size() {
         return Err(NativeError::new("io.print_mem: out of bounds"));
     }
-    // SAFETY: bounds check above ensures ptr..ptr+len is within the Vec<u8>
-    // allocation; the memory is never freed while the VM runs.
-    // Bytes come from compiler-provided string constants (already valid UTF-8).
     let bytes = unsafe { std::slice::from_raw_parts(memory.as_ptr().add(ptr), len) };
     let s = unsafe { std::str::from_utf8_unchecked(bytes) };
     println!("{s}");
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
 pub struct Io;
@@ -187,7 +155,7 @@ impl NativeModule for Io {
         5
     }
 
-    fn call(&self, index: u16, args: &[VmValue], memory: &mut Memory) -> NativeResult {
+    fn call(&self, index: u16, args: &[u64], memory: &mut Memory) -> NativeResult {
         match index {
             0 => print_i64(args),
             1 => print_u64(args),
@@ -223,91 +191,75 @@ pub fn std_linker() -> NativeLinker {
     linker
 }
 
-fn malloc_native(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn malloc_native(args: &[u64], memory: &mut Memory) -> NativeResult {
     if args.is_empty() {
         return Err(NativeError::new("core.malloc expects 1 argument (size)"));
     }
-    // SAFETY: see file-level safety contract; the size argument was written
-    // via from_u64 by the compiler
-    let size = unsafe { scalar_arg_unchecked(args).u64 as usize };
+    let size = args[0] as usize;
     let ptr = memory.malloc(size);
-    Ok(vec![VmValue::scalar(Register::from_ptr(ptr))])
+    Ok(vec![ptr as u64])
 }
 
-fn free_native(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn free_native(args: &[u64], memory: &mut Memory) -> NativeResult {
     if args.is_empty() {
         return Err(NativeError::new("core.free expects 1 argument (ptr)"));
     }
-    let ptr = unsafe { scalar_arg_unchecked(args).ptr };
+    let ptr = args[0] as usize;
     memory.free_malloc(ptr);
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
-fn memcpy(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn memcpy(args: &[u64], memory: &mut Memory) -> NativeResult {
     if args.len() < 3 {
         return Err(NativeError::new("core.memcpy expects 3 arguments"));
     }
-    // SAFETY: see file-level safety contract; pointer arguments are written
-    // via from_ptr by the compiler
-    let dst = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
-    let src = unsafe { scalar_arg_at_unchecked(args, 1).ptr };
-    let len = unsafe { scalar_arg_at_unchecked(args, 2).ptr };
+    let dst = args[0] as usize;
+    let src = args[1] as usize;
+    let len = args[2] as usize;
     if src + len > memory.size() || dst + len > memory.size() {
         return Err(NativeError::new("core.memcpy: out of bounds"));
     }
-    // SAFETY: bounds check above ensures both src..src+len and dst..dst+len
-    // are within the Vec<u8> allocation; allocator guarantees regions don't
-    // alias in ways that would violate ptr::copy requirements
     unsafe {
         let src_ptr = memory.as_ptr().add(src);
         let dst_ptr = memory.as_mut_ptr().add(dst);
         std::ptr::copy(src_ptr, dst_ptr, len);
     }
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
-fn memset(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn memset(args: &[u64], memory: &mut Memory) -> NativeResult {
     if args.len() < 3 {
         return Err(NativeError::new("core.memset expects 3 arguments"));
     }
-    // SAFETY: see file-level safety contract; pointer arguments are written
-    // via from_ptr / from_u8 by the compiler
-    let dst = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
-    let byte = unsafe { scalar_arg_at_unchecked(args, 1).u8 };
-    let len = unsafe { scalar_arg_at_unchecked(args, 2).ptr };
+    let dst = args[0] as usize;
+    let byte = args[1] as u8;
+    let len = args[2] as usize;
     if dst + len > memory.size() {
         return Err(NativeError::new("core.memset: out of bounds"));
     }
-    // SAFETY: bounds check above ensures dst..dst+len is within the Vec<u8>
-    // allocation; write_bytes requires that dst is valid for len bytes of
-    // write, which is satisfied by the Vec<u8> backing store
     unsafe {
         let dst_ptr = memory.as_mut_ptr().add(dst);
         std::ptr::write_bytes(dst_ptr, byte, len);
     }
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
-fn alloc_gc(args: &[VmValue], memory: &mut Memory) -> NativeResult {
+fn alloc_gc(args: &[u64], memory: &mut Memory) -> NativeResult {
     if args.len() < 2 {
         return Err(NativeError::new(
             "core.alloc_gc expects 2 arguments (type_tag, size)",
         ));
     }
-    let type_tag = unsafe { scalar_arg_at_unchecked(args, 0).u8 };
-    let size = unsafe { scalar_arg_at_unchecked(args, 1).u64 as usize };
+    let type_tag = args[0] as u8;
+    let size = args[1] as usize;
     let ptr = memory.alloc_managed(type_tag, size, &[]);
-    Ok(vec![VmValue::scalar(Register::from_ptr(ptr))])
+    Ok(vec![ptr as u64])
 }
 
-fn gc_collect(args: &[VmValue], memory: &mut Memory) -> NativeResult {
-    let roots: Vec<usize> = args
-        .iter()
-        .filter_map(|v| v.as_scalar().map(|r| unsafe { r.ptr }))
-        .filter(|&p| p != 0)
-        .collect();
+fn gc_collect(args: &[u64], memory: &mut Memory) -> NativeResult {
+    let roots: Vec<usize> = args.iter().map(|&v| v as usize).filter(|&p| p != 0).collect();
     memory.collect_gc(&roots);
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
 pub struct Core;
@@ -321,7 +273,7 @@ impl NativeModule for Core {
         6
     }
 
-    fn call(&self, index: u16, args: &[VmValue], memory: &mut Memory) -> NativeResult {
+    fn call(&self, index: u16, args: &[u64], memory: &mut Memory) -> NativeResult {
         match index {
             0 => malloc_native(args, memory),
             1 => free_native(args, memory),
@@ -348,16 +300,14 @@ impl NativeModule for Core {
     }
 }
 
-fn sqrt_f64(args: &[VmValue]) -> NativeResult {
-    // SAFETY: see file-level safety contract; CALL passes f64 argument
-    let value = unsafe { scalar_arg_unchecked(args).f64 };
-    Ok(vec![VmValue::scalar(Register::from_f64(value.sqrt()))])
+fn sqrt_f64(args: &[u64]) -> NativeResult {
+    let value = f64::from_bits(args[0]);
+    Ok(vec![(value.sqrt()).to_bits()])
 }
 
-fn abs_i64(args: &[VmValue]) -> NativeResult {
-    // SAFETY: see file-level safety contract; CALL passes i64 argument
-    let value = unsafe { scalar_arg_unchecked(args).i64 };
-    Ok(vec![VmValue::scalar(Register::from_i64(value.abs()))])
+fn abs_i64(args: &[u64]) -> NativeResult {
+    let value = args[0] as i64;
+    Ok(vec![(value.abs()) as u64])
 }
 
 pub struct Math;
@@ -371,7 +321,7 @@ impl NativeModule for Math {
         2
     }
 
-    fn call(&self, index: u16, args: &[VmValue], _memory: &mut Memory) -> NativeResult {
+    fn call(&self, index: u16, args: &[u64], _memory: &mut Memory) -> NativeResult {
         match index {
             0 => sqrt_f64(args),
             1 => abs_i64(args),
@@ -406,22 +356,20 @@ impl Fs {
     }
 }
 
-fn fs_open(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
+fn fs_open(args: &[u64], memory: &Memory, fs: &Fs) -> NativeResult {
     if args.len() < 3 {
         return Err(NativeError::new(
             "fs.open expects 3 arguments (path_ptr, path_len, mode)",
         ));
     }
-    // SAFETY: see file-level safety contract
-    let path_ptr = unsafe { scalar_arg_at_unchecked(args, 0).ptr };
-    let path_len = unsafe { scalar_arg_at_unchecked(args, 1).u64 as usize };
-    let mode = unsafe { scalar_arg_at_unchecked(args, 2).i64 };
+    let path_ptr = args[0] as usize;
+    let path_len = args[1] as usize;
+    let mode = args[2] as i64;
 
     if path_ptr + path_len > memory.size() {
         return Err(NativeError::new("fs.open: path out of bounds"));
     }
 
-    // SAFETY: bounds checked above
     let path_bytes = unsafe { std::slice::from_raw_parts(memory.as_ptr().add(path_ptr), path_len) };
     let path = String::from_utf8_lossy(path_bytes);
 
@@ -444,21 +392,21 @@ fn fs_open(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
                 fd
             };
             fs.files.lock().unwrap().insert(fd, file);
-            Ok(vec![VmValue::scalar(Register::from_i64(fd))])
+            Ok(vec![fd as u64])
         }
-        Err(_) => Ok(vec![VmValue::scalar(Register::from_i64(-1))]),
+        Err(_) => Ok(vec![(-1i64) as u64]),
     }
 }
 
-fn fs_read(args: &[VmValue], memory: &mut Memory, fs: &Fs) -> NativeResult {
+fn fs_read(args: &[u64], memory: &mut Memory, fs: &Fs) -> NativeResult {
     if args.len() < 3 {
         return Err(NativeError::new(
             "fs.read expects 3 arguments (fd, buf_ptr, len)",
         ));
     }
-    let fd = unsafe { scalar_arg_at_unchecked(args, 0).i64 };
-    let buf_ptr = unsafe { scalar_arg_at_unchecked(args, 1).ptr };
-    let len = unsafe { scalar_arg_at_unchecked(args, 2).u64 as usize };
+    let fd = args[0] as i64;
+    let buf_ptr = args[1] as usize;
+    let len = args[2] as usize;
 
     if buf_ptr + len > memory.size() {
         return Err(NativeError::new("fs.read: buffer out of bounds"));
@@ -466,27 +414,26 @@ fn fs_read(args: &[VmValue], memory: &mut Memory, fs: &Fs) -> NativeResult {
 
     let mut files = fs.files.lock().unwrap();
     if let Some(file) = files.get_mut(&fd) {
-        // SAFETY: bounds checked above; buf_ptr..buf_ptr+len is within memory allocation
         let buf =
             unsafe { std::slice::from_raw_parts_mut(memory.as_mut_ptr().add(buf_ptr), len) };
         match file.read(buf) {
-            Ok(n) => Ok(vec![VmValue::scalar(Register::from_i64(n as i64))]),
-            Err(_) => Ok(vec![VmValue::scalar(Register::from_i64(-1))]),
+            Ok(n) => Ok(vec![n as u64]),
+            Err(_) => Ok(vec![(-1i64) as u64]),
         }
     } else {
-        Ok(vec![VmValue::scalar(Register::from_i64(-1))])
+        Ok(vec![(-1i64) as u64])
     }
 }
 
-fn fs_write(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
+fn fs_write(args: &[u64], memory: &Memory, fs: &Fs) -> NativeResult {
     if args.len() < 3 {
         return Err(NativeError::new(
             "fs.write expects 3 arguments (fd, buf_ptr, len)",
         ));
     }
-    let fd = unsafe { scalar_arg_at_unchecked(args, 0).i64 };
-    let buf_ptr = unsafe { scalar_arg_at_unchecked(args, 1).ptr };
-    let len = unsafe { scalar_arg_at_unchecked(args, 2).u64 as usize };
+    let fd = args[0] as i64;
+    let buf_ptr = args[1] as usize;
+    let len = args[2] as usize;
 
     if buf_ptr + len > memory.size() {
         return Err(NativeError::new("fs.write: buffer out of bounds"));
@@ -494,24 +441,23 @@ fn fs_write(args: &[VmValue], memory: &Memory, fs: &Fs) -> NativeResult {
 
     let mut files = fs.files.lock().unwrap();
     if let Some(file) = files.get_mut(&fd) {
-        // SAFETY: bounds checked above; buf_ptr..buf_ptr+len is within memory allocation
         let buf = unsafe { std::slice::from_raw_parts(memory.as_ptr().add(buf_ptr), len) };
         match file.write(buf) {
-            Ok(n) => Ok(vec![VmValue::scalar(Register::from_i64(n as i64))]),
-            Err(_) => Ok(vec![VmValue::scalar(Register::from_i64(-1))]),
+            Ok(n) => Ok(vec![n as u64]),
+            Err(_) => Ok(vec![(-1i64) as u64]),
         }
     } else {
-        Ok(vec![VmValue::scalar(Register::from_i64(-1))])
+        Ok(vec![(-1i64) as u64])
     }
 }
 
-fn fs_close(args: &[VmValue], fs: &Fs) -> NativeResult {
-    let fd = unsafe { scalar_arg_unchecked(args).i64 };
+fn fs_close(args: &[u64], fs: &Fs) -> NativeResult {
+    let fd = args[0] as i64;
     let mut files = fs.files.lock().unwrap();
     if files.remove(&fd).is_some() {
-        Ok(vec![VmValue::scalar(Register::from_i64(0))])
+        Ok(vec![0u64])
     } else {
-        Ok(vec![VmValue::scalar(Register::from_i64(-1))])
+        Ok(vec![(-1i64) as u64])
     }
 }
 
@@ -524,7 +470,7 @@ impl NativeModule for Fs {
         4
     }
 
-    fn call(&self, index: u16, args: &[VmValue], memory: &mut Memory) -> NativeResult {
+    fn call(&self, index: u16, args: &[u64], memory: &mut Memory) -> NativeResult {
         match index {
             0 => fs_open(args, memory, self),
             1 => fs_read(args, memory, self),
@@ -549,19 +495,18 @@ impl NativeModule for Fs {
 
 pub struct Time;
 
-fn time_now(_args: &[VmValue]) -> NativeResult {
+fn time_now(_args: &[u64]) -> NativeResult {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    Ok(vec![VmValue::scalar(Register::from_i64(ms))])
+    Ok(vec![ms as u64])
 }
 
-fn time_sleep(args: &[VmValue]) -> NativeResult {
-    // SAFETY: see file-level safety contract
-    let ms = unsafe { scalar_arg_unchecked(args).i64 };
+fn time_sleep(args: &[u64]) -> NativeResult {
+    let ms = args[0] as i64;
     std::thread::sleep(std::time::Duration::from_millis(ms as u64));
-    Ok(Vec::new())
+    Ok(vec![])
 }
 
 impl NativeModule for Time {
@@ -573,7 +518,7 @@ impl NativeModule for Time {
         2
     }
 
-    fn call(&self, index: u16, args: &[VmValue], _memory: &mut Memory) -> NativeResult {
+    fn call(&self, index: u16, args: &[u64], _memory: &mut Memory) -> NativeResult {
         match index {
             0 => time_now(args),
             1 => time_sleep(args),
@@ -616,26 +561,25 @@ fn rand_u64(state: &Mutex<u64>) -> u64 {
     *s
 }
 
-fn rng_u64(state: &Mutex<u64>, _args: &[VmValue]) -> NativeResult {
+fn rng_u64(state: &Mutex<u64>, _args: &[u64]) -> NativeResult {
     let v = rand_u64(state);
-    Ok(vec![VmValue::scalar(Register::from_u64(v))])
+    Ok(vec![v])
 }
 
-fn rng_range(state: &Mutex<u64>, args: &[VmValue]) -> NativeResult {
+fn rng_range(state: &Mutex<u64>, args: &[u64]) -> NativeResult {
     if args.len() < 2 {
         return Err(NativeError::new(
             "rand.range expects 2 arguments (min, max)",
         ));
     }
-    // SAFETY: see file-level safety contract
-    let min = unsafe { scalar_arg_at_unchecked(args, 0).i64 };
-    let max = unsafe { scalar_arg_at_unchecked(args, 1).i64 };
+    let min = args[0] as i64;
+    let max = args[1] as i64;
     if min > max {
         return Err(NativeError::new("rand.range: min > max"));
     }
     let range = (max - min + 1) as u64;
     let v = rand_u64(state) % range;
-    Ok(vec![VmValue::scalar(Register::from_i64(min + v as i64))])
+    Ok(vec![(min + v as i64) as u64])
 }
 
 impl NativeModule for Rng {
@@ -647,7 +591,7 @@ impl NativeModule for Rng {
         2
     }
 
-    fn call(&self, index: u16, args: &[VmValue], _memory: &mut Memory) -> NativeResult {
+    fn call(&self, index: u16, args: &[u64], _memory: &mut Memory) -> NativeResult {
         match index {
             0 => rng_u64(&self.state, args),
             1 => rng_range(&self.state, args),
@@ -673,15 +617,14 @@ mod tests {
     fn test_time_now() {
         let time = Time;
         let result = time.call(0, &[], &mut Memory::new(1)).unwrap();
-        let ms = unsafe { result[0].as_scalar().unwrap().i64 };
+        let ms = result[0] as i64;
         assert!(ms > 0);
     }
 
     #[test]
     fn test_time_sleep() {
         let time = Time;
-        let arg = VmValue::scalar(Register::from_i64(10));
-        let result = time.call(1, &[arg], &mut Memory::new(1));
+        let result = time.call(1, &[10u64], &mut Memory::new(1));
         assert!(result.is_ok());
     }
 
@@ -689,7 +632,7 @@ mod tests {
     fn test_rand_u64() {
         let rng = Rng::new();
         let result = rng.call(0, &[], &mut Memory::new(1)).unwrap();
-        let v = unsafe { result[0].as_scalar().unwrap().u64 };
+        let v = result[0];
         // extremely unlikely to be 0 with xorshift seeded by nanosecond time
         assert!(v != 0);
     }
@@ -701,14 +644,11 @@ mod tests {
             let result = rng
                 .call(
                     1,
-                    &[
-                        VmValue::scalar(Register::from_i64(10)),
-                        VmValue::scalar(Register::from_i64(20)),
-                    ],
+                    &[10u64, 20u64],
                     &mut Memory::new(1),
                 )
                 .unwrap();
-            let v = unsafe { result[0].as_scalar().unwrap().i64 };
+            let v = result[0] as i64;
             assert!(v >= 10 && v <= 20, "got {v}");
         }
     }
@@ -736,14 +676,14 @@ mod tests {
             .call(
                 0,
                 &[
-                    VmValue::scalar(Register::from_ptr(path_ptr)),
-                    VmValue::scalar(Register::from_u64(path_bytes.len() as u64)),
-                    VmValue::scalar(Register::from_i64(1)),
+                    path_ptr as u64,
+                    path_bytes.len() as u64,
+                    1u64,
                 ],
                 &mut mem,
             )
             .unwrap();
-        let fd = unsafe { result[0].as_scalar().unwrap().i64 };
+        let fd = result[0] as i64;
         assert!(fd >= 0, "open for write failed");
 
         // write data
@@ -761,35 +701,35 @@ mod tests {
             .call(
                 2,
                 &[
-                    VmValue::scalar(Register::from_i64(fd)),
-                    VmValue::scalar(Register::from_ptr(data_ptr)),
-                    VmValue::scalar(Register::from_u64(data.len() as u64)),
+                    fd as u64,
+                    data_ptr as u64,
+                    data.len() as u64,
                 ],
                 &mut mem,
             )
             .unwrap();
-        let written = unsafe { result[0].as_scalar().unwrap().i64 };
+        let written = result[0] as i64;
         assert_eq!(written, data.len() as i64);
 
         // close
         let result = fs
-            .call(3, &[VmValue::scalar(Register::from_i64(fd))], &mut mem)
+            .call(3, &[fd as u64], &mut mem)
             .unwrap();
-        assert_eq!(unsafe { result[0].as_scalar().unwrap().i64 }, 0);
+        assert_eq!(result[0] as i64, 0);
 
         // open for read (mode=0)
         let result = fs
             .call(
                 0,
                 &[
-                    VmValue::scalar(Register::from_ptr(path_ptr)),
-                    VmValue::scalar(Register::from_u64(path_bytes.len() as u64)),
-                    VmValue::scalar(Register::from_i64(0)),
+                    path_ptr as u64,
+                    path_bytes.len() as u64,
+                    0u64,
                 ],
                 &mut mem,
             )
             .unwrap();
-        let fd2 = unsafe { result[0].as_scalar().unwrap().i64 };
+        let fd2 = result[0] as i64;
         assert!(fd2 >= 0, "open for read failed");
 
         // read back
@@ -798,26 +738,25 @@ mod tests {
             .call(
                 1,
                 &[
-                    VmValue::scalar(Register::from_i64(fd2)),
-                    VmValue::scalar(Register::from_ptr(read_buf)),
-                    VmValue::scalar(Register::from_u64(128)),
+                    fd2 as u64,
+                    read_buf as u64,
+                    128u64,
                 ],
                 &mut mem,
             )
             .unwrap();
-        let n = unsafe { result[0].as_scalar().unwrap().i64 };
+        let n = result[0] as i64;
         assert_eq!(n, data.len() as i64);
 
-        // SAFETY: n was returned by fs.read which wrote exactly n bytes into read_buf
         let read_data =
             unsafe { std::slice::from_raw_parts(mem.as_ptr().add(read_buf), n as usize) };
         assert_eq!(read_data, data);
 
         // close read fd
         let result = fs
-            .call(3, &[VmValue::scalar(Register::from_i64(fd2))], &mut mem)
+            .call(3, &[fd2 as u64], &mut mem)
             .unwrap();
-        assert_eq!(unsafe { result[0].as_scalar().unwrap().i64 }, 0);
+        assert_eq!(result[0] as i64, 0);
 
         // clean up
         std::fs::remove_file(&temp_path).ok();
