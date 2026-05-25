@@ -1180,15 +1180,16 @@ impl Vm {
                             }
                             unsafe { frame_mut.set_unchecked(arg_count, callable); }
                         } else if let Some(idx) = callable.as_native_import() {
+                            let u64_args: Vec<u64> = args.iter().map(|v| unsafe { v.scalar_bits_unchecked() }).collect();
                             let returns = self
                                 .linker
-                                .call(idx, &args, &mut self.memory)
+                                .call(idx, &u64_args, &mut self.memory)
                                 .map_err(|e| VMError::NativeError(e.message))?;
                             for (i, val) in returns.into_iter().enumerate() {
                                 let tgt = base
                                     .checked_add(i as u8)
                                     .ok_or(VMError::InvalidRegister(base))?;
-                                unsafe { *regs_ptr.add(tgt as usize) = val; }
+                                unsafe { *regs_ptr.add(tgt as usize) = VmValue::scalar(Register { bits: val }); }
                             }
                             return self.ret(base, 0);
                         } else if let Some(closure) = callable.as_closure() {
@@ -2121,10 +2122,11 @@ impl Vm {
                     }
                     unsafe { frame_mut.set_unchecked(arg_count, callable); }
                 } else if let Some(idx) = callable.as_native_import() {
-                    let returns = self.linker.call(idx, &args, &mut self.memory).map_err(|e| VMError::NativeError(e.message))?;
+                    let u64_args: Vec<u64> = args.iter().map(|v| unsafe { v.scalar_bits_unchecked() }).collect();
+                    let returns = self.linker.call(idx, &u64_args, &mut self.memory).map_err(|e| VMError::NativeError(e.message))?;
                     for (i, val) in returns.into_iter().enumerate() {
                         let tgt = base.checked_add(i as u8).ok_or(VMError::InvalidRegister(base))?;
-                        unsafe { *regs_ptr.add(tgt as usize) = val; }
+                        unsafe { *regs_ptr.add(tgt as usize) = VmValue::scalar(Register { bits: val }); }
                     }
                     return self.ret(base, 0);
                 } else if let Some(closure) = callable.as_closure() {
@@ -2334,16 +2336,17 @@ impl Vm {
         }
 
         if let Some(function) = callable.as_native_import() {
+            let u64_args: Vec<u64> = args.iter().map(|v| unsafe { v.scalar_bits_unchecked() }).collect();
             let returns = self
                 .linker
-                .call(function, &args, &mut self.memory)
+                .call(function, &u64_args, &mut self.memory)
                 .map_err(|NativeError { message }| VMError::NativeError(message))?;
             let copy_count = usize::min(expected_returns as usize, returns.len());
             for (index, value) in returns.into_iter().take(copy_count).enumerate() {
                 let target = base
                     .checked_add(index as u8)
                     .ok_or(VMError::InvalidRegister(base))?;
-                unsafe { self.set_value_unchecked(target, value); }
+                unsafe { self.set_value_unchecked(target, VmValue::scalar(Register { bits: value })); }
             }
             for index in copy_count..expected_returns as usize {
                 let target = base
