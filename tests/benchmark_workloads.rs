@@ -6,6 +6,12 @@ use std::process::Command;
 
 use ember::bytecode::text::parse_module;
 
+fn execute_and_validate(module: ember::Module, expected: u64) -> Result<(), String> {
+    let (mut vm, module, validation) = harness::prepare_workload(module, expected).into_parts();
+    let execution = vm.run_module(module);
+    harness::validate_workload(execution, validation)
+}
+
 #[test]
 fn benchmark_workloads_parse_encode_decode_and_execute() {
     for workload in harness::all_workloads() {
@@ -13,25 +19,36 @@ fn benchmark_workloads_parse_encode_decode_and_execute() {
         let bytes = harness::encode_workload(&module);
         let decoded = ember::bytecode::binary::decode_module(&bytes)
             .unwrap_or_else(|error| panic!("{} failed to decode: {error:?}", workload.name));
-        harness::execute_workload(decoded, workload.expected)
+        execute_and_validate(decoded, workload.expected)
             .unwrap_or_else(|error| panic!("{}: {error}", workload.name));
     }
 }
 
 #[test]
-fn fibonacci_workloads_run_through_the_release_cli() {
+fn benchmark_workload_preparation_and_validation_are_separate_from_vm_execution() {
+    let workload = harness::memory();
+    let module = harness::parse_workload(&workload);
+    let prepared = harness::prepare_workload(module, workload.expected);
+    let (mut vm, module, validation) = prepared.into_parts();
+
+    let execution = vm.run_module(module);
+
+    harness::validate_workload(execution, validation)
+        .expect("prepared workload must validate after VM execution");
+}
+
+#[test]
+fn fibonacci_workloads_run_through_the_cargo_provided_cli() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let programs_dir = manifest_dir.join("target/bench-results/programs");
     std::fs::create_dir_all(&programs_dir)
         .unwrap_or_else(|error| panic!("failed to create {}: {error}", programs_dir.display()));
 
-    let release_cli = manifest_dir
-        .join("target/release")
-        .join(format!("ember{}", std::env::consts::EXE_SUFFIX));
+    let cargo_cli = PathBuf::from(env!("CARGO_BIN_EXE_ember"));
     assert!(
-        release_cli.is_file(),
-        "release CLI is missing at {}; run `cargo build --release` first",
-        release_cli.display()
+        cargo_cli.is_file(),
+        "Cargo-provided CLI is missing at {}",
+        cargo_cli.display()
     );
 
     for workload in [harness::fib_inline(), harness::fib_function()] {
@@ -57,11 +74,11 @@ fn fibonacci_workloads_run_through_the_release_cli() {
         std::fs::write(&program_path, bytes)
             .unwrap_or_else(|error| panic!("failed to write {}: {error}", program_path.display()));
 
-        let output = Command::new(&release_cli)
+        let output = Command::new(&cargo_cli)
             .arg("run")
             .arg(&program_path)
             .output()
-            .unwrap_or_else(|error| panic!("failed to run {}: {error}", release_cli.display()));
+            .unwrap_or_else(|error| panic!("failed to run {}: {error}", cargo_cli.display()));
         assert!(
             output.status.success(),
             "{} CLI run failed: {}",

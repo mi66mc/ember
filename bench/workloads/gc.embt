@@ -11,6 +11,7 @@
   1 i64 32
   2 i64 1000
   3 i64 42
+  4 i64 0
 
 .callables
   0 core.alloc_gc
@@ -18,8 +19,9 @@
   2 bench.consume
 
 .functions
-  0 "main" regs=5
+  0 "main" regs=6
     loadk r4, 2
+    loadk r5, 4
     @loop:
     closure r0, 0, 0
     loadk r1, 0
@@ -30,10 +32,11 @@
     loadk r0, 0
     closure r1, 1, 0
     call r1, 0, 0
+    add.i64 r5, r5, r0
     sub.i64 r4, r4, r0
     jmpif r4, @loop
     closure r0, 2, 0
-    loadk r1, 2
+    move r1, r5
     call r0, 1, 0
     halt
   end

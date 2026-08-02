@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 use ember::bytecode::binary::encode_module;
 use ember::bytecode::text::parse_module;
 use ember::vm::native::Core;
-use ember::{Module, NativeError, NativeLinker, NativeModule, NativeResult, Vm};
+use ember::{Module, NativeError, NativeLinker, NativeModule, NativeResult, VMError, Vm};
 
 pub const VM_MEMORY_BYTES: usize = 1024 * 1024;
 
@@ -115,7 +115,24 @@ impl NativeModule for BenchSink {
     }
 }
 
-pub fn execute_workload(module: Module, expected: u64) -> Result<(), String> {
+pub struct PreparedWorkload {
+    vm: Vm,
+    module: Module,
+    validation: WorkloadValidation,
+}
+
+impl PreparedWorkload {
+    pub fn into_parts(self) -> (Vm, Module, WorkloadValidation) {
+        (self.vm, self.module, self.validation)
+    }
+}
+
+pub struct WorkloadValidation {
+    value: Arc<AtomicU64>,
+    expected: u64,
+}
+
+pub fn prepare_workload(module: Module, expected: u64) -> PreparedWorkload {
     let value = Arc::new(AtomicU64::new(0));
     let mut linker = NativeLinker::default();
     linker.mount(Core);
@@ -123,14 +140,24 @@ pub fn execute_workload(module: Module, expected: u64) -> Result<(), String> {
         value: Arc::clone(&value),
     });
 
-    let mut vm = Vm::with_linker(VM_MEMORY_BYTES, linker);
-    vm.run_module(module.clone())
-        .map_err(|error| format!("workload execution failed: {error:?}"))?;
+    PreparedWorkload {
+        vm: Vm::with_linker(VM_MEMORY_BYTES, linker),
+        module,
+        validation: WorkloadValidation { value, expected },
+    }
+}
 
-    let actual = value.load(Ordering::Relaxed);
-    if actual != expected {
+pub fn validate_workload(
+    execution: Result<(), VMError>,
+    validation: WorkloadValidation,
+) -> Result<(), String> {
+    execution.map_err(|error| format!("workload execution failed: {error:?}"))?;
+
+    let actual = validation.value.load(Ordering::Relaxed);
+    if actual != validation.expected {
         return Err(format!(
-            "workload result mismatch: expected {expected}, got {actual}"
+            "workload result mismatch: expected {}, got {actual}",
+            validation.expected
         ));
     }
     Ok(())

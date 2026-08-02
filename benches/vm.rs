@@ -1,7 +1,7 @@
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use ember::bytecode::binary::decode_module;
 use ember::bytecode::text::parse_module;
 
@@ -44,20 +44,49 @@ fn benchmarks(criterion: &mut Criterion) {
 
     for workload in harness::all_workloads() {
         let module = harness::parse_workload(&workload);
-        let mut execute = criterion.benchmark_group(format!("execute/{}", workload.name));
+
+        let mut construct = criterion.benchmark_group("construct");
+        construct.bench_function(workload.name, |bencher| {
+            bencher.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let started = Instant::now();
+                    let prepared = harness::prepare_workload(
+                        black_box(module.clone()),
+                        black_box(workload.expected),
+                    );
+                    elapsed += started.elapsed();
+                    drop(black_box(prepared));
+                }
+                elapsed
+            });
+        });
+        construct.finish();
+
+        let mut execute = criterion.benchmark_group("execute");
         if matches!(workload.name, "fib_inline" | "fib_function") {
             // This is logical VM work (10,000 fib calculations), not instructions/second yet.
             execute.throughput(Throughput::Elements(10_000));
         }
         execute.bench_function(workload.name, |bencher| {
-            bencher.iter_batched(
-                || module.clone(),
-                |module| {
-                    harness::execute_workload(black_box(module), workload.expected)
+            bencher.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let prepared = black_box(harness::prepare_workload(
+                        black_box(module.clone()),
+                        black_box(workload.expected),
+                    ));
+                    let (mut vm, module, validation) = prepared.into_parts();
+
+                    let started = Instant::now();
+                    let execution = vm.run_module(module);
+                    elapsed += started.elapsed();
+
+                    harness::validate_workload(execution, validation)
                         .expect("benchmark workload must produce its expected result");
-                },
-                BatchSize::SmallInput,
-            );
+                }
+                elapsed
+            });
         });
         execute.finish();
     }

@@ -21,10 +21,16 @@ so each Ember workload is compared only with its matching CPython reference.
 ### Component benchmarks (Criterion)
 
 `benches/vm.rs` runs Criterion in-process. It reports text parsing, binary
-decoding, and VM execution independently. Setup is outside the timed execution
-routine: execution clones a parsed module, creates a fresh VM, runs it, and
-checks its sink result. Parsing, encoding, file I/O, expected-result
-construction, and printing are not charged to the execution measurement.
+decoding, VM construction, and VM execution independently. The
+`construct/<workload>` measurements include the one required parsed-module
+clone plus sink, linker, native-module, and VM construction. For each
+`execute/<workload>` sample, those objects are prepared before the clock starts;
+only `Vm::run_module` contributes to the reported duration, and the sink result
+is checked after the clock stops. Parsing, encoding, file I/O, construction,
+result verification, and printing are not charged to execution.
+
+The execution IDs are exactly `execute/fib_inline`, `execute/fib_function`,
+`execute/memory`, `execute/closure`, and `execute/gc`.
 
 This is a VM-component measurement, not a full CLI benchmark. For Fibonacci,
 Criterion reports logical Fibonacci calculations per second; that throughput is
@@ -50,7 +56,7 @@ are local generated artifacts and must not be committed.
 | `fib_function` | 10,000 iterative `fib(30)` calculations through the VM function-call path | 832040 |
 | `memory` | One 40-byte allocation followed by repeated integer loads, stores, and additions | 150 |
 | `closure` | 10,000 closure calls that increment a captured value | 10000 |
-| `gc` | 1,000 managed allocations with explicit collection | 1000 |
+| `gc` | 1,000 managed allocations with explicit collection and a scalar counter incremented after each successful allocation/collection | 1000 |
 
 All Criterion workloads use `bench.consume` to validate output without printing
 in the measured execution path. The process comparison transforms the two
@@ -69,9 +75,10 @@ python bench/compare.py --ember target/release/ember.exe --warmup 5 --samples 30
 ```
 
 `cargo test` validates parsing, encoding, decoding, execution, expected values,
-and the comparison-report contract. The release build supplies the process
-runner's CLI. Criterion must complete parse, decode, and all five execution
-workloads before a baseline is accepted.
+and the comparison-report contract using the Cargo-provided test executable; it
+does not require a prior release build. The release build supplies the process
+runner's CLI. Criterion must complete parse, decode, and all five construction
+and execution workloads before a baseline is accepted.
 
 Use at least 5 warmup observations and 30 retained samples for every
 startup-inclusive comparison. The runner permits no fewer than one warmup and
