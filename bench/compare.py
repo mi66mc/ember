@@ -11,6 +11,7 @@ import platform
 import statistics
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter_ns
@@ -22,11 +23,14 @@ WORKLOADS = ("fib_inline", "fib_function")
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
 
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return parsed
+def minimum_int(minimum: int):
+    def parse(value: str) -> int:
+        parsed = int(value)
+        if parsed < minimum:
+            raise argparse.ArgumentTypeError(f"must be at least {minimum}")
+        return parsed
+
+    return parse
 
 
 def nonnegative_int(value: str) -> int:
@@ -36,39 +40,97 @@ def nonnegative_int(value: str) -> int:
     return parsed
 
 
+class CommandFailure(RuntimeError):
+    def __init__(
+        self,
+        command: list[str],
+        exit_code: int | None,
+        stdout: bytes | None,
+        stderr: bytes | None,
+        reason: str,
+    ) -> None:
+        self.command = command
+        self.exit_code = exit_code
+        self.stdout = (stdout or b"").decode("utf-8", errors="replace")
+        self.stderr = (stderr or b"").decode("utf-8", errors="replace")
+        self.reason = reason
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        return "\n".join(
+            (
+                f"reason: {self.reason}",
+                f"command: {format_command(self.command)}",
+                f"exit_code: {self.exit_code if self.exit_code is not None else 'unavailable'}",
+                f"stdout: {self.stdout!r}",
+                f"stderr: {self.stderr!r}",
+            )
+        )
+
+
 def command_for(runtime: str, workload: str, ember: str) -> list[str]:
     if runtime == "ember":
         return [ember, "run", f"target/bench-results/programs/{workload}.emb"]
     return [sys.executable, "bench/reference.py", workload]
 
 
-def run_once(command: list[str]) -> int:
+def run_once(
+    command: list[str], timeout_seconds: int, process_options: dict[str, Any]
+) -> int:
     started_ns = perf_counter_ns()
-    completed = subprocess.run(
-        command,
-        cwd=REPOSITORY_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+            **process_options,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise CommandFailure(
+            command,
+            None,
+            error.stdout,
+            error.stderr,
+            f"timed out after {timeout_seconds} seconds",
+        ) from error
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CommandFailure(
+            command,
+            None,
+            None,
+            None,
+            f"could not start command: {error}",
+        ) from error
     elapsed_ns = perf_counter_ns() - started_ns
 
     if completed.returncode != 0:
-        raise RuntimeError(
-            f"command failed with exit {completed.returncode}: {format_command(command)}\n"
-            f"stderr: {completed.stderr.decode('utf-8', errors='replace')}"
+        raise CommandFailure(
+            command,
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+            "command exited unsuccessfully",
         )
     if completed.stderr:
-        raise RuntimeError(
-            f"command wrote to stderr: {format_command(command)}\n"
-            f"stderr: {completed.stderr.decode('utf-8', errors='replace')}"
+        raise CommandFailure(
+            command,
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+            "command wrote to stderr",
         )
     stdout = completed.stdout.decode("utf-8", errors="replace")
     normalized_stdout = stdout.replace("\r\n", "\n")
     if normalized_stdout != EXPECTED_OUTPUT:
-        raise RuntimeError(
-            f"command stdout must be exactly 832040: {format_command(command)}\n"
-            f"stdout: {stdout!r}"
+        raise CommandFailure(
+            command,
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+            f"command stdout must be exactly {EXPECTED_OUTPUT.strip()}",
         )
     return elapsed_ns
 
@@ -112,7 +174,7 @@ def git_value(*args: str) -> str | None:
     return completed.stdout.decode("utf-8", errors="replace").strip()
 
 
-def metadata() -> dict[str, Any]:
+def environment() -> dict[str, Any]:
     cpu_description = (
         platform.processor()
         or platform.uname().processor
@@ -141,6 +203,54 @@ def metadata() -> dict[str, Any]:
         "cpu_description": cpu_description,
         "complete": complete,
     }
+
+
+def cpu_affinity_options(requested: int | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    if requested is None:
+        return {"cpu_affinity": None, "cpu_affinity_status": "not_requested"}, {}
+
+    if os.name == "nt":
+        print(
+            "warning: CPU affinity was requested, but standard Windows subprocess "
+            "facilities cannot set it; continuing without CPU affinity.",
+            file=sys.stderr,
+        )
+        return {
+            "cpu_affinity": None,
+            "cpu_affinity_status": "unavailable",
+            "cpu_affinity_requested": requested,
+        }, {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+
+    if hasattr(os, "sched_setaffinity"):
+        return {
+            "cpu_affinity": requested,
+            "cpu_affinity_status": "applied",
+        }, {"preexec_fn": lambda: os.sched_setaffinity(0, {requested})}
+
+    print(
+        f"warning: CPU affinity is unsupported on {sys.platform}; continuing without it.",
+        file=sys.stderr,
+    )
+    return {
+        "cpu_affinity": requested,
+        "cpu_affinity_status": "unsupported",
+    }, {}
+
+
+def atomic_write(path: Path, contents: str) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary:
+        temporary.write(contents)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
+    temporary_path.replace(path)
 
 
 def render_markdown(results: list[dict[str, Any]], run_metadata: dict[str, Any]) -> str:
@@ -178,49 +288,64 @@ def render_markdown(results: list[dict[str, Any]], run_metadata: dict[str, Any])
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ember", required=True, help="path to the Ember release CLI")
-    parser.add_argument("--warmup", type=nonnegative_int, default=5)
-    parser.add_argument("--samples", type=positive_int, default=30)
+    parser.add_argument("--warmup", type=minimum_int(1), default=5)
+    parser.add_argument("--samples", type=minimum_int(10), default=30)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--timeout-seconds", type=minimum_int(1), default=30)
+    parser.add_argument("--label", help="optional label recorded with the comparison")
+    parser.add_argument("--cpu-affinity", type=nonnegative_int, metavar="N")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    affinity_configuration, process_options = cpu_affinity_options(args.cpu_affinity)
     results: list[dict[str, Any]] = []
-    for workload in WORKLOADS:
-        for runtime in ("ember", "cpython"):
-            command = command_for(runtime, workload, args.ember)
-            for _ in range(args.warmup):
-                run_once(command)
-            samples_ns = [run_once(command) for _ in range(args.samples)]
-            results.append(
-                {
-                    "workload": workload,
-                    "runtime": runtime,
-                    "command": command,
-                    "samples_ns": samples_ns,
-                    "statistics_ms": sample_statistics(samples_ns),
-                }
-            )
+    try:
+        for workload in WORKLOADS:
+            for runtime in ("ember", "cpython"):
+                command = command_for(runtime, workload, args.ember)
+                for _ in range(args.warmup):
+                    run_once(command, args.timeout_seconds, process_options)
+                samples_ns = [
+                    run_once(command, args.timeout_seconds, process_options)
+                    for _ in range(args.samples)
+                ]
+                results.append(
+                    {
+                        "workload": workload,
+                        "runtime": runtime,
+                        "command": command,
+                        "samples_ns": samples_ns,
+                        "statistics_ms": sample_statistics(samples_ns),
+                    }
+                )
+    except CommandFailure as error:
+        print(f"comparison failed; no report was published:\n{error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
-    run_metadata = metadata()
+    run_environment = environment()
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "latest.json"
     markdown_path = output_dir / "latest.md"
-    json_path.write_text(
-        json.dumps(
-            {
-                "configuration": {"warmup": args.warmup, "samples": args.samples},
-                "metadata": run_metadata,
-                "results": results,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    report = {
+        "schema_version": 1,
+        "environment": run_environment,
+        "configuration": {
+            "warmup": args.warmup,
+            "samples": args.samples,
+            "timeout_seconds": args.timeout_seconds,
+            "label": args.label,
+            **affinity_configuration,
+        },
+        "results": results,
+    }
+    atomic_write(
+        json_path,
+        json.dumps(report, indent=2) + "\n",
     )
-    markdown_path.write_text(render_markdown(results, run_metadata), encoding="utf-8")
+    atomic_write(markdown_path, render_markdown(results, run_environment))
     print(f"Wrote {json_path}")
     print(f"Wrote {markdown_path}")
 

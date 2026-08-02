@@ -1,6 +1,7 @@
 use std::hint::black_box;
+use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use ember::bytecode::binary::decode_module;
 use ember::bytecode::text::parse_module;
 
@@ -41,9 +42,13 @@ fn benchmarks(criterion: &mut Criterion) {
         );
     });
 
-    let mut execute = criterion.benchmark_group("execute");
     for workload in harness::all_workloads() {
         let module = harness::parse_workload(&workload);
+        let mut execute = criterion.benchmark_group(format!("execute/{}", workload.name));
+        if matches!(workload.name, "fib_inline" | "fib_function") {
+            // This is logical VM work (10,000 fib calculations), not instructions/second yet.
+            execute.throughput(Throughput::Elements(10_000));
+        }
         execute.bench_function(workload.name, |bencher| {
             bencher.iter_batched(
                 || module.clone(),
@@ -54,9 +59,16 @@ fn benchmarks(criterion: &mut Criterion) {
                 BatchSize::SmallInput,
             );
         });
+        execute.finish();
     }
-    execute.finish();
 }
 
-criterion_group!(vm, benchmarks);
+criterion_group! {
+    name = vm;
+    config = Criterion::default()
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(10))
+        .sample_size(50);
+    targets = benchmarks
+}
 criterion_main!(vm);
