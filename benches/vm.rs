@@ -41,16 +41,21 @@ fn benchmarks(criterion: &mut Criterion) {
         );
     });
 
-    criterion.bench_function("execute/fib_inline", |bencher| {
-        bencher.iter_batched(
-            || module.clone(),
-            |module| {
-                harness::execute_workload(black_box(module), workload.expected)
-                    .expect("benchmark workload must produce its expected result");
-            },
-            BatchSize::SmallInput,
-        );
-    });
+    let mut execute = criterion.benchmark_group("execute");
+    for workload in harness::all_workloads() {
+        let module = harness::parse_workload(&workload);
+        execute.bench_function(workload.name, |bencher| {
+            bencher.iter_batched(
+                || module.clone(),
+                |module| {
+                    harness::execute_workload(black_box(module), workload.expected)
+                        .expect("benchmark workload must produce its expected result");
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    execute.finish();
 }
 
 criterion_group!(vm, benchmarks);

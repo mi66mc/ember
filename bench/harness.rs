@@ -6,6 +6,7 @@ use std::sync::{
 
 use ember::bytecode::binary::encode_module;
 use ember::bytecode::text::parse_module;
+use ember::vm::native::Core;
 use ember::{Module, NativeError, NativeLinker, NativeModule, NativeResult, Vm};
 
 pub const VM_MEMORY_BYTES: usize = 1024 * 1024;
@@ -23,6 +24,43 @@ pub fn fib_inline() -> Workload {
             .join("bench/workloads/fib_inline.embt"),
         expected: 832_040,
     }
+}
+
+pub fn fib_function() -> Workload {
+    Workload {
+        name: "fib_function",
+        source_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("bench/workloads/fib_function.embt"),
+        expected: 832_040,
+    }
+}
+
+pub fn memory() -> Workload {
+    Workload {
+        name: "memory",
+        source_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bench/workloads/memory.embt"),
+        expected: 150,
+    }
+}
+
+pub fn closure() -> Workload {
+    Workload {
+        name: "closure",
+        source_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bench/workloads/closure.embt"),
+        expected: 10_000,
+    }
+}
+
+pub fn gc() -> Workload {
+    Workload {
+        name: "gc",
+        source_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bench/workloads/gc.embt"),
+        expected: 1_000,
+    }
+}
+
+pub fn all_workloads() -> Vec<Workload> {
+    vec![fib_inline(), fib_function(), memory(), closure(), gc()]
 }
 
 pub fn parse_workload(workload: &Workload) -> Module {
@@ -80,6 +118,7 @@ impl NativeModule for BenchSink {
 pub fn execute_workload(module: Module, expected: u64) -> Result<(), String> {
     let value = Arc::new(AtomicU64::new(0));
     let mut linker = NativeLinker::default();
+    linker.mount(Core);
     linker.mount(BenchSink {
         value: Arc::clone(&value),
     });
