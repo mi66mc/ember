@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -174,7 +175,25 @@ def git_value(*args: str) -> str | None:
     return completed.stdout.decode("utf-8", errors="replace").strip()
 
 
-def environment() -> dict[str, Any]:
+def executable_identity(executable: str) -> tuple[str, dict[str, Any]]:
+    path = Path(executable)
+    if not path.is_absolute():
+        path = REPOSITORY_ROOT / path
+    canonical_path = path.resolve(strict=True)
+    executable_stat = canonical_path.stat()
+    digest = hashlib.sha256()
+    with canonical_path.open("rb") as executable_file:
+        for block in iter(lambda: executable_file.read(1024 * 1024), b""):
+            digest.update(block)
+    return str(canonical_path), {
+        "canonical_path": str(canonical_path),
+        "size_bytes": executable_stat.st_size,
+        "mtime_ns": executable_stat.st_mtime_ns,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def environment(ember_executable: dict[str, Any]) -> dict[str, Any]:
     cpu_description = (
         platform.processor()
         or platform.uname().processor
@@ -201,6 +220,7 @@ def environment() -> dict[str, Any]:
         "operating_system": platform.platform(),
         "architecture": platform.machine(),
         "cpu_description": cpu_description,
+        "ember_executable": ember_executable,
         "complete": complete,
     }
 
@@ -254,6 +274,7 @@ def atomic_write(path: Path, contents: str) -> None:
 
 
 def render_markdown(results: list[dict[str, Any]], run_metadata: dict[str, Any]) -> str:
+    ember_executable = run_metadata["ember_executable"]
     lines = [
         "# Ember / CPython Fibonacci comparison",
         "",
@@ -280,6 +301,12 @@ def render_markdown(results: list[dict[str, Any]], run_metadata: dict[str, Any])
             "",
             f"Metadata complete: {'yes' if run_metadata['complete'] else 'no'}.",
             f"Git commit: {run_metadata['git_commit'] or 'unavailable'}.",
+            "",
+            "Ember executable:",
+            f"- Canonical path: `{ember_executable['canonical_path']}`",
+            f"- Size: {ember_executable['size_bytes']} bytes",
+            f"- Modification time: {ember_executable['mtime_ns']} ns since the Unix epoch",
+            f"- SHA-256: `{ember_executable['sha256']}`",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -300,11 +327,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     affinity_configuration, process_options = cpu_affinity_options(args.cpu_affinity)
+    output_dir = args.output
+    json_path = output_dir / "latest.json"
+    markdown_path = output_dir / "latest.md"
+    try:
+        ember_path, ember_executable = executable_identity(args.ember)
+    except OSError as error:
+        print(f"comparison failed; could not identify --ember: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
     results: list[dict[str, Any]] = []
     try:
         for workload in WORKLOADS:
             for runtime in ("ember", "cpython"):
-                command = command_for(runtime, workload, args.ember)
+                command = command_for(runtime, workload, ember_path)
                 for _ in range(args.warmup):
                     run_once(command, args.timeout_seconds, process_options)
                 samples_ns = [
@@ -321,14 +356,15 @@ def main() -> None:
                     }
                 )
     except CommandFailure as error:
-        print(f"comparison failed; no report was published:\n{error}", file=sys.stderr)
+        if json_path.exists() or markdown_path.exists():
+            outcome = "previous latest reports were preserved"
+        else:
+            outcome = "no report was published"
+        print(f"comparison failed; {outcome}:\n{error}", file=sys.stderr)
         raise SystemExit(1) from error
 
-    run_environment = environment()
-    output_dir = args.output
+    run_environment = environment(ember_executable)
     output_dir.mkdir(parents=True, exist_ok=True)
-    json_path = output_dir / "latest.json"
-    markdown_path = output_dir / "latest.md"
     report = {
         "schema_version": 1,
         "environment": run_environment,

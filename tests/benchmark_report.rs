@@ -296,18 +296,32 @@ fn comparison_emits_parseable_schema_and_raw_samples() {
     );
 
     let json_path = output_dir.join("latest.json");
+    let markdown_path = output_dir.join("latest.md");
     let validator = Command::new(python)
         .args([
             "-c",
-            r#"import json
+            r#"import hashlib
+import json
 import sys
+from pathlib import Path
 
 with open(sys.argv[1], encoding="utf-8") as source:
     report = json.load(source)
 
 assert report["schema_version"] == 1
 assert set(report) == {"schema_version", "environment", "configuration", "results"}
-assert {"generated_at_utc", "git_commit", "git_dirty", "python_version", "operating_system", "architecture", "cpu_description", "complete"} <= set(report["environment"])
+assert {"generated_at_utc", "git_commit", "git_dirty", "python_version", "operating_system", "architecture", "cpu_description", "complete", "ember_executable"} <= set(report["environment"])
+ember_path = Path(sys.argv[2]).resolve(strict=True)
+ember_stat = ember_path.stat()
+ember_identity = report["environment"]["ember_executable"]
+assert ember_identity == {
+    "canonical_path": str(ember_path),
+    "size_bytes": ember_stat.st_size,
+    "mtime_ns": ember_stat.st_mtime_ns,
+    "sha256": hashlib.sha256(ember_path.read_bytes()).hexdigest(),
+}
+assert Path(ember_identity["canonical_path"]).is_absolute()
+assert "git_commit" not in ember_identity
 assert report["configuration"]["warmup"] == 1
 assert report["configuration"]["samples"] == 10
 assert report["configuration"]["timeout_seconds"] == 30
@@ -322,9 +336,17 @@ for item in report["results"]:
     assert all(isinstance(sample, int) and sample > 0 for sample in item["samples_ns"])
     assert set(item["statistics_ms"]) == {"min_ms", "median_ms", "p95_ms", "max_ms", "mad_ms"}
     assert isinstance(item["command"], list) and item["command"]
+
+markdown = Path(sys.argv[3]).read_text(encoding="utf-8")
+assert f"- Canonical path: `{ember_identity['canonical_path']}`" in markdown
+assert f"- Size: {ember_identity['size_bytes']} bytes" in markdown
+assert f"- Modification time: {ember_identity['mtime_ns']} ns since the Unix epoch" in markdown
+assert f"- SHA-256: `{ember_identity['sha256']}`" in markdown
 "#,
         ])
         .arg(&json_path)
+        .arg(&fake_ember)
+        .arg(&markdown_path)
         .output()
         .expect("Python must be available to validate the emitted JSON");
     assert!(
@@ -333,7 +355,6 @@ for item in report["results"]:
         String::from_utf8_lossy(&validator.stderr)
     );
 
-    let markdown_path = output_dir.join("latest.md");
     let markdown = fs::read_to_string(&markdown_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", markdown_path.display()));
     for row in [
@@ -347,17 +368,31 @@ for item in report["results"]:
 }
 
 #[test]
-fn comparison_failures_do_not_publish_latest_reports() {
+fn comparison_failures_preserve_the_last_successful_reports() {
     let temporary = TestDir::new("failures");
     let python = python_executable();
     let fake_ember = create_fake_ember(temporary.path(), python);
+    let output_dir = temporary.path().join("report");
+
+    let successful = run_comparison(python, &fake_ember, &output_dir, "success", 30);
+    assert!(
+        successful.status.success(),
+        "initial comparison failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&successful.stdout),
+        String::from_utf8_lossy(&successful.stderr)
+    );
+    let json_path = output_dir.join("latest.json");
+    let markdown_path = output_dir.join("latest.md");
+    let successful_json = fs::read(&json_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", json_path.display()));
+    let successful_markdown = fs::read(&markdown_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", markdown_path.display()));
 
     for (mode, timeout, expected_reason) in [
         ("nonzero", 30, "command exited unsuccessfully"),
         ("wrong_output", 30, "command stdout must be exactly 832040"),
         ("timeout", 1, "timed out after 1 seconds"),
     ] {
-        let output_dir = temporary.path().join(mode);
         let comparison = run_comparison(python, &fake_ember, &output_dir, mode, timeout);
         assert!(
             !comparison.status.success(),
@@ -365,13 +400,23 @@ fn comparison_failures_do_not_publish_latest_reports() {
         );
         let stderr = String::from_utf8_lossy(&comparison.stderr);
         assert!(
-            stderr.contains("comparison failed; no report was published")
+            stderr.contains("comparison failed; previous latest reports were preserved")
                 && stderr.contains(expected_reason),
             "{mode} failure diagnostics were incomplete: {stderr}"
         );
-        assert!(
-            !output_dir.join("latest.json").exists() && !output_dir.join("latest.md").exists(),
-            "{mode} failure published a latest report"
+        assert_eq!(
+            fs::read(&json_path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", json_path.display())),
+            successful_json,
+            "{mode} failure changed the last successful JSON report"
+        );
+        assert_eq!(
+            fs::read(&markdown_path).unwrap_or_else(|error| panic!(
+                "failed to read {}: {error}",
+                markdown_path.display()
+            )),
+            successful_markdown,
+            "{mode} failure changed the last successful Markdown report"
         );
     }
 }
