@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,7 +36,141 @@ impl Drop for TestDir {
     }
 }
 
-fn create_fake_ember(directory: &Path) -> PathBuf {
+fn select_python(
+    configured: Option<PathBuf>,
+    candidates: &[PathBuf],
+    mut is_supported: impl FnMut(&Path) -> bool,
+) -> Result<PathBuf, String> {
+    if let Some(configured) = configured {
+        if is_supported(&configured) {
+            return Ok(configured);
+        }
+        return Err(format!(
+            "configured Python is not Python 3.10+: {}",
+            configured.display()
+        ));
+    }
+    candidates
+        .iter()
+        .find(|candidate| is_supported(candidate))
+        .cloned()
+        .ok_or_else(|| "could not find Python 3.10+; set EMBER_BENCH_PYTHON".to_owned())
+}
+
+fn python_executable() -> &'static Path {
+    static PYTHON: OnceLock<PathBuf> = OnceLock::new();
+    PYTHON
+        .get_or_init(|| {
+            let configured = std::env::var_os("EMBER_BENCH_PYTHON")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+            #[cfg(windows)]
+            let candidates = [PathBuf::from("python"), PathBuf::from("python3")];
+            #[cfg(not(windows))]
+            let candidates = [PathBuf::from("python3"), PathBuf::from("python")];
+            select_python(configured, &candidates, python_is_supported)
+                .unwrap_or_else(|error| panic!("{error}"))
+        })
+        .as_path()
+}
+
+fn python_is_supported(executable: &Path) -> bool {
+    Command::new(executable)
+        .args([
+            "-c",
+            "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[test]
+fn python_selection_prefers_the_configured_executable() {
+    let configured = PathBuf::from("configured-python");
+    let candidates = [PathBuf::from("python3"), PathBuf::from("python")];
+    let mut probed = Vec::new();
+
+    let selected = select_python(Some(configured.clone()), &candidates, |candidate| {
+        probed.push(candidate.to_path_buf());
+        candidate == configured
+    })
+    .expect("configured Python should be selected");
+
+    assert_eq!(selected, configured);
+    assert_eq!(probed, [configured]);
+}
+
+#[test]
+fn python_selection_discovers_the_first_supported_candidate() {
+    let candidates = [
+        PathBuf::from("unsupported-python"),
+        PathBuf::from("python-3.10-or-newer"),
+        PathBuf::from("later-python"),
+    ];
+    let mut probed = Vec::new();
+
+    let selected = select_python(None, &candidates, |candidate| {
+        probed.push(candidate.to_path_buf());
+        candidate == Path::new("python-3.10-or-newer")
+    })
+    .expect("a supported Python candidate should be discovered");
+
+    assert_eq!(selected, Path::new("python-3.10-or-newer"));
+    assert_eq!(probed, candidates[..2]);
+}
+
+#[test]
+fn fake_ember_launcher_uses_the_selected_python_executable() {
+    let temporary = TestDir::new("selected-python-launcher");
+    let marker = temporary.path().join("selected-python-ran");
+
+    #[cfg(windows)]
+    let selected_python = {
+        let launcher = temporary.path().join("selected-python.cmd");
+        fs::write(
+            &launcher,
+            format!(
+                "@echo selected>\"{}\"\r\n@echo 832040\r\n",
+                marker.display()
+            ),
+        )
+        .expect("selected Python launcher must be writable");
+        launcher
+    };
+
+    #[cfg(unix)]
+    let selected_python = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let launcher = temporary.path().join("selected-python");
+        fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf selected > '{}'\nprintf '832040\\n'\n",
+                marker.display()
+            ),
+        )
+        .expect("selected Python launcher must be writable");
+        let mut permissions = fs::metadata(&launcher)
+            .expect("selected Python launcher metadata must be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&launcher, permissions)
+            .expect("selected Python launcher executable bit must be set");
+        launcher
+    };
+
+    let fake_ember = create_fake_ember(temporary.path(), &selected_python);
+    let output = Command::new(&fake_ember)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", fake_ember.display()));
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "832040");
+    assert!(marker.is_file(), "fake Ember bypassed the selected Python");
+}
+
+fn create_fake_ember(directory: &Path, python: &Path) -> PathBuf {
     let script = directory.join("fake_ember.py");
     fs::write(
         &script,
@@ -62,7 +197,7 @@ else:
         let launcher = directory.join("fake_ember.cmd");
         fs::write(
             &launcher,
-            format!("@python \"{}\" %*\r\n", script.display()),
+            format!("@\"{}\" \"{}\" %*\r\n", python.display(), script.display()),
         )
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", launcher.display()));
         launcher
@@ -76,8 +211,9 @@ else:
         fs::write(
             &launcher,
             format!(
-                "#!/usr/bin/env python\n{}",
-                fs::read_to_string(&script).unwrap()
+                "#!/bin/sh\nexec '{}' '{}' \"$@\"\n",
+                python.display(),
+                script.display()
             ),
         )
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", launcher.display()));
@@ -90,8 +226,14 @@ else:
     }
 }
 
-fn run_comparison(fake_ember: &Path, output_dir: &Path, mode: &str, timeout: u64) -> Output {
-    Command::new("python")
+fn run_comparison(
+    python: &Path,
+    fake_ember: &Path,
+    output_dir: &Path,
+    mode: &str,
+    timeout: u64,
+) -> Output {
+    Command::new(python)
         .args(["bench/compare.py", "--ember"])
         .arg(fake_ember)
         .args([
@@ -111,12 +253,41 @@ fn run_comparison(fake_ember: &Path, output_dir: &Path, mode: &str, timeout: u64
 }
 
 #[test]
+fn comparison_imports_with_the_python_3_10_datetime_api() {
+    let compatibility_check = Command::new(python_executable())
+        .args([
+            "-c",
+            r#"import datetime as real_datetime
+import runpy
+import sys
+import types
+
+python_310_datetime = types.ModuleType("datetime")
+python_310_datetime.datetime = real_datetime.datetime
+python_310_datetime.timezone = real_datetime.timezone
+sys.modules["datetime"] = python_310_datetime
+runpy.run_path("bench/compare.py", run_name="bench_compare")
+"#,
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("Python must be available to check Python 3.10 compatibility");
+
+    assert!(
+        compatibility_check.status.success(),
+        "compare.py used a datetime API unavailable in Python 3.10: {}",
+        String::from_utf8_lossy(&compatibility_check.stderr)
+    );
+}
+
+#[test]
 fn comparison_emits_parseable_schema_and_raw_samples() {
     let temporary = TestDir::new("success");
-    let fake_ember = create_fake_ember(temporary.path());
+    let python = python_executable();
+    let fake_ember = create_fake_ember(temporary.path(), python);
     let output_dir = temporary.path().join("report");
 
-    let comparison = run_comparison(&fake_ember, &output_dir, "success", 30);
+    let comparison = run_comparison(python, &fake_ember, &output_dir, "success", 30);
     assert!(
         comparison.status.success(),
         "comparison failed:\nstdout: {}\nstderr: {}",
@@ -125,7 +296,7 @@ fn comparison_emits_parseable_schema_and_raw_samples() {
     );
 
     let json_path = output_dir.join("latest.json");
-    let validator = Command::new("python")
+    let validator = Command::new(python)
         .args([
             "-c",
             r#"import json
@@ -178,7 +349,8 @@ for item in report["results"]:
 #[test]
 fn comparison_failures_do_not_publish_latest_reports() {
     let temporary = TestDir::new("failures");
-    let fake_ember = create_fake_ember(temporary.path());
+    let python = python_executable();
+    let fake_ember = create_fake_ember(temporary.path(), python);
 
     for (mode, timeout, expected_reason) in [
         ("nonzero", 30, "command exited unsuccessfully"),
@@ -186,7 +358,7 @@ fn comparison_failures_do_not_publish_latest_reports() {
         ("timeout", 1, "timed out after 1 seconds"),
     ] {
         let output_dir = temporary.path().join(mode);
-        let comparison = run_comparison(&fake_ember, &output_dir, mode, timeout);
+        let comparison = run_comparison(python, &fake_ember, &output_dir, mode, timeout);
         assert!(
             !comparison.status.success(),
             "{mode} comparison unexpectedly succeeded"

@@ -12,7 +12,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter_ns
 from typing import Any
@@ -194,7 +194,7 @@ def environment() -> dict[str, Any]:
         )
     )
     return {
-        "generated_at_utc": datetime.now(UTC).isoformat(),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": commit,
         "git_dirty": None if dirty_output is None else bool(dirty_output),
         "python_version": platform.python_version(),

@@ -44,6 +44,12 @@ runs only equivalent `fib_inline` and `fib_function` pairs. A command that
 fails, writes to stderr, or produces anything other than `832040` cannot publish
 a report.
 
+The comparison scripts support Python 3.10 and newer.
+The Rust integration test discovers `python`/`python3` and uses one selected
+executable for the runner, JSON validation, and fake Ember launchers. Set
+`EMBER_BENCH_PYTHON` to an explicit Python 3.10+ executable when discovery is
+ambiguous.
+
 The runner writes `latest.json` (raw samples, configuration, and environment)
 and `latest.md` (a descriptive table) to the requested output directory. These
 are local generated artifacts and must not be committed.
