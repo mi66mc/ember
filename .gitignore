@@ -1,3 +1,5 @@
 /target
 /target/bench-results/
+__pycache__/
+*.py[cod]
 ember.txt
