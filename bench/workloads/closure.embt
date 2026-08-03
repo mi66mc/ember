@@ -14,8 +14,8 @@
   1 bench.consume
 
 .functions
-  0 "main" regs=5
-    loadk r1, 0
+  0 "main" regs=6
+    loadk r5, 0
     closure r4, 0, 1
     loadk r3, 2
     loadk r1, 1

@@ -4,6 +4,7 @@ mod harness;
 use std::path::PathBuf;
 use std::process::Command;
 
+use ember::bytecode::Opcode;
 use ember::bytecode::text::parse_module;
 
 fn execute_and_validate(module: ember::Module, expected: u64) -> Result<(), String> {
@@ -35,6 +36,36 @@ fn benchmark_workload_preparation_and_validation_are_separate_from_vm_execution(
 
     harness::validate_workload(execution, validation)
         .expect("prepared workload must validate after VM execution");
+}
+
+#[test]
+fn closure_workload_explicitly_initializes_its_captured_register() {
+    let workload = harness::closure();
+    let module = harness::parse_workload(&workload);
+    let entry = module
+        .entry_function()
+        .expect("closure workload must have an entry function");
+    let chunk = entry.chunk();
+
+    assert_eq!(chunk.max_registers(), 6);
+    let closure_index = chunk
+        .code()
+        .iter()
+        .position(|instruction| {
+            instruction.opcode() == Opcode::CLOSURE
+                && instruction.a() == 4
+                && instruction.b() == 0
+                && instruction.c() == 1
+        })
+        .expect("closure workload must create its counter closure in r4");
+    assert!(
+        chunk.code()[..closure_index].iter().any(|instruction| {
+            instruction.opcode() == Opcode::LOADK && instruction.a() == 5 && instruction.bx() == 0
+        }),
+        "closure workload must initialize the captured final register r5 to constant 0"
+    );
+
+    execute_and_validate(module, 10_000).expect("closure workload must produce 10000");
 }
 
 #[test]
