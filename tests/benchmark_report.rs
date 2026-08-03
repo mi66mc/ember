@@ -405,6 +405,12 @@ assert f"- SHA-256: `{ember_identity['sha256']}`" in markdown
 
     let markdown = fs::read_to_string(&markdown_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", markdown_path.display()));
+    assert!(
+        markdown.contains(
+            "The timed interval includes process creation and capture of stdout and stderr; exit-status and final-output validation occur after the timer stops and are excluded."
+        ),
+        "Markdown report must accurately describe which benchmark work is timed"
+    );
     for row in [
         "| fib_inline | ember | 10 |",
         "| fib_inline | cpython | 10 |",

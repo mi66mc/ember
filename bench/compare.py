@@ -307,7 +307,7 @@ def render_markdown(results: list[dict[str, Any]], run_metadata: dict[str, Any])
     lines = [
         "# Ember / CPython Fibonacci comparison",
         "",
-        "> Warning: these are startup-inclusive, local measurements; process creation, module loading, and final output are included.",
+        "> Warning: these are startup-inclusive, local measurements. The timed interval includes process creation and capture of stdout and stderr; exit-status and final-output validation occur after the timer stops and are excluded.",
         "",
         "The table is descriptive only. It does not make a runtime-superiority claim.",
         "",
