@@ -24,7 +24,7 @@ as though they measured the same scope:
 | Benchmark | Scope | Included in the reported duration | What it cannot establish |
 | --- | --- | --- | --- |
 | Criterion | In-process VM component | Only the named component; `execute/*` isolates `Vm::run_module` | CLI startup cost or general Ember-versus-CPython superiority |
-| `compare.py` | One new process per observation | Process startup, runtime and module loading, workload execution, and output validation | General runtime superiority beyond the named Fibonacci workloads and recorded environment |
+| `compare.py` | One new process per observation | Process startup, runtime and module loading, workload execution, and output capture | General runtime superiority beyond the named Fibonacci workloads and recorded environment |
 
 Criterion is an internal component benchmark. The comparison runner is a
 startup-inclusive end-to-end process benchmark. A result from either class is
@@ -52,12 +52,17 @@ Criterion reports logical Fibonacci calculations per second; that throughput is
 ### Process comparisons
 
 `bench/compare.py` starts a new Ember or CPython process for every observation.
-It includes process creation, module loading, and final output validation. It
-runs only equivalent `fib_inline` and `fib_function` pairs. A command that
-fails, writes to stderr, or produces anything other than `832040` cannot publish
-a new report. If successful `latest.json` and `latest.md` files already exist,
-a failed run leaves both files byte-for-byte unchanged and says that it preserved
-the previous latest reports.
+The reported duration includes process creation, module loading, workload
+execution, and output capture. After the clock stops, the runner validates the
+captured output; that validation is not part of the reported duration. It runs
+only equivalent `fib_inline` and `fib_function` pairs. A command that fails,
+writes to stderr, or produces anything other than `832040` cannot publish a new
+report. If successful `latest.json` and `latest.md` files already exist,
+a benchmark or handled publication failure leaves both files byte-for-byte
+unchanged. During publication, each file is replaced atomically on its own; if
+the second replacement fails while the runner remains active, it restores the
+pre-publication bytes of both files. The pair is not transactionally atomic
+against a process crash or machine failure between the two replacements.
 
 The comparison scripts support Python 3.10 and newer.
 The Rust integration test discovers `python`/`python3` and uses one selected

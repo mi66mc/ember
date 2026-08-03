@@ -252,6 +252,54 @@ fn run_comparison(
         .expect("Python must be available to run the comparison")
 }
 
+fn run_comparison_with_second_publication_failure(
+    python: &Path,
+    fake_ember: &Path,
+    output_dir: &Path,
+) -> Output {
+    Command::new(python)
+        .args([
+            "-c",
+            r#"import importlib.util
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("bench_compare", "bench/compare.py")
+compare = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(compare)
+
+real_replace = os.replace
+failed = False
+
+def fail_second_report_replace(source, destination):
+    global failed
+    if Path(destination).name == "latest.md" and not failed:
+        failed = True
+        raise OSError("synthetic latest.md publication failure")
+    return real_replace(source, destination)
+
+os.replace = fail_second_report_replace
+sys.argv = [
+    "bench/compare.py",
+    "--ember", sys.argv[1],
+    "--warmup", "1",
+    "--samples", "10",
+    "--timeout-seconds", "30",
+    "--output", sys.argv[2],
+    "--label", "replacement",
+]
+compare.main()
+"#,
+        ])
+        .arg(fake_ember)
+        .arg(output_dir)
+        .env("FAKE_EMBER_MODE", "success")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("Python must be available to run the comparison")
+}
+
 #[test]
 fn comparison_imports_with_the_python_3_10_datetime_api() {
     let compatibility_check = Command::new(python_executable())
@@ -419,4 +467,51 @@ fn comparison_failures_preserve_the_last_successful_reports() {
             "{mode} failure changed the last successful Markdown report"
         );
     }
+}
+
+#[test]
+fn second_report_publication_failure_restores_both_previous_reports() {
+    let temporary = TestDir::new("publication-rollback");
+    let python = python_executable();
+    let fake_ember = create_fake_ember(temporary.path(), python);
+    let output_dir = temporary.path().join("report");
+
+    let successful = run_comparison(python, &fake_ember, &output_dir, "success", 30);
+    assert!(
+        successful.status.success(),
+        "initial comparison failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&successful.stdout),
+        String::from_utf8_lossy(&successful.stderr)
+    );
+
+    let json_path = output_dir.join("latest.json");
+    let markdown_path = output_dir.join("latest.md");
+    let successful_json = fs::read(&json_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", json_path.display()));
+    let successful_markdown = fs::read(&markdown_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", markdown_path.display()));
+
+    let failed = run_comparison_with_second_publication_failure(python, &fake_ember, &output_dir);
+    assert!(
+        !failed.status.success(),
+        "comparison unexpectedly succeeded after latest.md publication failure"
+    );
+    assert!(
+        String::from_utf8_lossy(&failed.stderr)
+            .contains("publication failed; previous latest reports were restored"),
+        "publication failure diagnostics were incomplete: {}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert_eq!(
+        fs::read(&json_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", json_path.display())),
+        successful_json,
+        "publication failure changed the last successful JSON report"
+    );
+    assert_eq!(
+        fs::read(&markdown_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", markdown_path.display())),
+        successful_markdown,
+        "publication failure changed the last successful Markdown report"
+    );
 }

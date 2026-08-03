@@ -257,10 +257,11 @@ def cpu_affinity_options(requested: int | None) -> tuple[dict[str, Any], dict[st
     }, {}
 
 
-def atomic_write(path: Path, contents: str) -> None:
+def atomic_write(path: Path, contents: str | bytes) -> None:
+    binary = isinstance(contents, bytes)
     with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
+        mode="wb" if binary else "w",
+        encoding=None if binary else "utf-8",
         dir=path.parent,
         prefix=f".{path.name}.",
         suffix=".tmp",
@@ -270,7 +271,35 @@ def atomic_write(path: Path, contents: str) -> None:
         temporary.flush()
         os.fsync(temporary.fileno())
         temporary_path = Path(temporary.name)
-    temporary_path.replace(path)
+    try:
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def publish_reports(reports: list[tuple[Path, str]]) -> None:
+    previous = [(path, path.read_bytes() if path.exists() else None) for path, _ in reports]
+    try:
+        for path, contents in reports:
+            atomic_write(path, contents)
+    except OSError as publication_error:
+        rollback_errors = []
+        for path, contents in previous:
+            try:
+                if contents is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write(path, contents)
+            except OSError as rollback_error:
+                rollback_errors.append(f"{path}: {rollback_error}")
+        if rollback_errors:
+            details = "; ".join(rollback_errors)
+            raise RuntimeError(
+                f"report publication failed ({publication_error}); rollback failed: {details}"
+            ) from publication_error
+        raise RuntimeError(
+            f"previous latest reports were restored: {publication_error}"
+        ) from publication_error
 
 
 def render_markdown(results: list[dict[str, Any]], run_metadata: dict[str, Any]) -> str:
@@ -377,11 +406,16 @@ def main() -> None:
         },
         "results": results,
     }
-    atomic_write(
-        json_path,
-        json.dumps(report, indent=2) + "\n",
-    )
-    atomic_write(markdown_path, render_markdown(results, run_environment))
+    try:
+        publish_reports(
+            [
+                (json_path, json.dumps(report, indent=2) + "\n"),
+                (markdown_path, render_markdown(results, run_environment)),
+            ]
+        )
+    except RuntimeError as error:
+        print(f"publication failed; {error}", file=sys.stderr)
+        raise SystemExit(1) from error
     print(f"Wrote {json_path}")
     print(f"Wrote {markdown_path}")
 
