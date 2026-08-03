@@ -18,6 +18,19 @@ so each Ember workload is compared only with its matching CPython reference.
 
 ## Benchmark classes
 
+These classes answer different questions and their numbers must not be compared
+as though they measured the same scope:
+
+| Benchmark | Scope | Included in the reported duration | What it cannot establish |
+| --- | --- | --- | --- |
+| Criterion | In-process VM component | Only the named component; `execute/*` isolates `Vm::run_module` | CLI startup cost or general Ember-versus-CPython superiority |
+| `compare.py` | One new process per observation | Process startup, runtime and module loading, workload execution, and output validation | General runtime superiority beyond the named Fibonacci workloads and recorded environment |
+
+Criterion is an internal component benchmark. The comparison runner is a
+startup-inclusive end-to-end process benchmark. A result from either class is
+local evidence for its exact workload and scope, never a general ranking of the
+runtimes.
+
 ### Component benchmarks (Criterion)
 
 `benches/vm.rs` runs Criterion in-process. It reports text parsing, binary
@@ -42,7 +55,9 @@ Criterion reports logical Fibonacci calculations per second; that throughput is
 It includes process creation, module loading, and final output validation. It
 runs only equivalent `fib_inline` and `fib_function` pairs. A command that
 fails, writes to stderr, or produces anything other than `832040` cannot publish
-a report.
+a new report. If successful `latest.json` and `latest.md` files already exist,
+a failed run leaves both files byte-for-byte unchanged and says that it preserved
+the previous latest reports.
 
 The comparison scripts support Python 3.10 and newer.
 The Rust integration test discovers `python`/`python3` and uses one selected
@@ -53,6 +68,11 @@ ambiguous.
 The runner writes `latest.json` (raw samples, configuration, and environment)
 and `latest.md` (a descriptive table) to the requested output directory. These
 are local generated artifacts and must not be committed.
+
+The environment metadata records the benchmarked Ember executable independently
+from the source Git commit: canonical absolute path, byte size, modification
+time, and SHA-256 digest. This identifies the binary that actually ran; the Git
+fields identify repository state, and neither substitutes for the other.
 
 ## Workloads and expected results
 
