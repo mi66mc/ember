@@ -1,0 +1,46 @@
+.module "fib_function"
+.entry 0
+
+.import
+  bench.consume
+
+.constants
+  0 i64 30
+  1 i64 0
+  2 i64 1
+  3 i64 10000
+
+.callables
+  0 function 1
+  1 bench.consume
+
+.functions
+  0 "main" regs=4
+    loadk r3, 3
+    loadk r2, 2
+    @outer:
+    closure r0, 0, 0
+    loadk r1, 0
+    call r0, 1, 1
+    sub.i64 r3, r3, r2
+    jmpif r3, @outer
+    move r2, r0
+    closure r1, 1, 0
+    call r1, 1, 0
+    halt
+  end
+
+  1 "fib" regs=5
+    loadk r1, 1
+    loadk r2, 2
+    loadk r4, 2
+    @inner:
+    jmpifnot r0, @done
+    move r3, r1
+    move r1, r2
+    add.i64 r2, r3, r2
+    sub.i64 r0, r0, r4
+    jmp @inner
+    @done:
+    ret r1, 1
+  end

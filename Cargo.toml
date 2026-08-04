@@ -9,3 +9,10 @@ codegen-units = 1
 panic = "abort"
 
 [dependencies]
+
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "vm"
+harness = false

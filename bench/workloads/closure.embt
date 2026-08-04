@@ -1,0 +1,39 @@
+.module "closure"
+.entry 0
+
+.import
+  bench.consume
+
+.constants
+  0 i64 0
+  1 i64 1
+  2 i64 10000
+
+.callables
+  0 function 1
+  1 bench.consume
+
+.functions
+  0 "main" regs=6
+    loadk r5, 0
+    closure r4, 0, 1
+    loadk r3, 2
+    loadk r1, 1
+    @loop:
+    move r2, r4
+    call r2, 0, 1
+    sub.i64 r3, r3, r1
+    jmpif r3, @loop
+    closure r0, 1, 0
+    move r1, r2
+    call r0, 1, 0
+    halt
+  end
+
+  1 "increment" regs=3
+    loadk r2, 1
+    getupval r1, 0, r0
+    add.i64 r1, r1, r2
+    setupval r1, 0, r0
+    ret r1, 1
+  end
